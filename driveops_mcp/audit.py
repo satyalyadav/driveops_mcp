@@ -1,0 +1,199 @@
+"""SQLite plan and audit-event storage."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from pathlib import Path
+from typing import Any
+
+from .auth import state_dir
+from .schemas import now_iso
+
+
+class AuditStore:
+    def __init__(self, db_path: Path | None = None) -> None:
+        self.db_path = db_path or state_dir() / "driveops.db"
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                create table if not exists plans (
+                    id text primary key,
+                    status text not null,
+                    created_at text not null,
+                    updated_at text not null,
+                    confirmation text not null,
+                    undo_confirmation text not null,
+                    strategy text not null,
+                    folder_id text not null,
+                    dry_run integer not null,
+                    plan_json text not null,
+                    error text
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists audit_events (
+                    id text primary key,
+                    plan_id text,
+                    action text not null,
+                    status text not null,
+                    subject_id text,
+                    before_json text,
+                    after_json text,
+                    message text,
+                    created_at text not null
+                )
+                """
+            )
+
+    def save_plan(self, plan: dict[str, Any]) -> None:
+        ts = now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into plans (
+                    id, status, created_at, updated_at, confirmation,
+                    undo_confirmation, strategy, folder_id, dry_run, plan_json, error
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan["plan_id"],
+                    plan["status"],
+                    ts,
+                    ts,
+                    plan["confirmation"],
+                    plan["undo_confirmation"],
+                    plan["strategy"],
+                    plan["folder"]["id"],
+                    int(bool(plan.get("dry_run", True))),
+                    json.dumps(plan, sort_keys=True),
+                    plan.get("error"),
+                ),
+            )
+
+    def get_plan(self, plan_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute("select * from plans where id = ?", (plan_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Plan {plan_id} not found.")
+        return json.loads(row["plan_json"])
+
+    def latest_plan(self, *, status: str | None = None) -> dict[str, Any]:
+        sql = "select * from plans"
+        params: list[Any] = []
+        if status:
+            sql += " where status = ?"
+            params.append(status)
+        sql += " order by created_at desc limit 1"
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            suffix = f" with status {status}" if status else ""
+            raise KeyError(f"No DriveOps plan{suffix} found.")
+        return json.loads(row["plan_json"])
+
+    def update_plan(self, plan: dict[str, Any], *, status: str | None = None, error: str | None = None) -> None:
+        if status is not None:
+            plan["status"] = status
+        if error is not None:
+            plan["error"] = error
+        plan["updated_at"] = now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update plans
+                set status = ?, updated_at = ?, plan_json = ?, error = ?
+                where id = ?
+                """,
+                (
+                    plan["status"],
+                    plan["updated_at"],
+                    json.dumps(plan, sort_keys=True),
+                    plan.get("error"),
+                    plan["plan_id"],
+                ),
+            )
+
+    def append_event(
+        self,
+        *,
+        action: str,
+        status: str,
+        plan_id: str | None = None,
+        subject_id: str | None = None,
+        before: Any = None,
+        after: Any = None,
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        event = {
+            "id": str(uuid.uuid4()),
+            "plan_id": plan_id,
+            "action": action,
+            "status": status,
+            "subject_id": subject_id,
+            "before": before,
+            "after": after,
+            "message": message,
+            "created_at": now_iso(),
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into audit_events (
+                    id, plan_id, action, status, subject_id, before_json,
+                    after_json, message, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["id"],
+                    plan_id,
+                    action,
+                    status,
+                    subject_id,
+                    json.dumps(before, sort_keys=True) if before is not None else None,
+                    json.dumps(after, sort_keys=True) if after is not None else None,
+                    message,
+                    event["created_at"],
+                ),
+            )
+        return event
+
+    def list_events(self, *, limit: int = 50, plan_id: str | None = None) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        sql = "select * from audit_events"
+        params: list[Any] = []
+        if plan_id:
+            sql += " where plan_id = ?"
+            params.append(plan_id)
+        sql += " order by created_at desc limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            events.append(
+                {
+                    "id": row["id"],
+                    "plan_id": row["plan_id"],
+                    "action": row["action"],
+                    "status": row["status"],
+                    "subject_id": row["subject_id"],
+                    "before": json.loads(row["before_json"]) if row["before_json"] else None,
+                    "after": json.loads(row["after_json"]) if row["after_json"] else None,
+                    "message": row["message"],
+                    "created_at": row["created_at"],
+                }
+            )
+        return events

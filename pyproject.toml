@@ -1,0 +1,27 @@
+[project]
+name = "driveops-mcp"
+version = "0.1.0"
+description = "Open-source MCP-native Google Drive operations layer with plans, approvals, undo, and audit logs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]==2.0.0a3",
+    "google-auth>=2.29.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-api-python-client>=2.136.0",
+    "pydantic>=2.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.3.0",
+]
+
+[project.scripts]
+driveops-mcp = "driveops_mcp.server:main"
+gdrive-mcp = "driveops_mcp.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
