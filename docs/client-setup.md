@@ -4,15 +4,32 @@ DriveOps MCP supports local stdio and local Streamable HTTP. Stdio is easiest fo
 
 ## Codex
 
-Stdio in `~/.codex/config.toml`:
+Codex desktop app stdio in `~/.codex-app/config.toml`; Codex CLI stdio in `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.driveops]
-command = "/absolute/path/to/gdrive-mcp/.venv/bin/driveops-mcp"
+command = "/home/satyal/gdrive-mcp/.venv/bin/driveops-mcp"
 args = ["stdio"]
-cwd = "/absolute/path/to/gdrive-mcp"
+cwd = "/home/satyal/gdrive-mcp"
+startup_timeout_sec = 120
 default_tools_approval_mode = "prompt"
 ```
+
+The desktop app loads MCP servers when a thread starts. After editing config, start a new thread or restart the app/window. The first Drive tool call will trigger Google OAuth if no token exists, but the cleaner path is to run this once from a terminal first:
+
+```bash
+/home/satyal/gdrive-mcp/.venv/bin/driveops-mcp auth login
+```
+
+## Browser Auth by OS
+
+DriveOps opens Google OAuth lazily on the first Drive-accessing tool call. The same code path is used by Codex, Claude Code, Gemini CLI, Cursor, and other local stdio clients.
+
+- Windows: uses the platform browser opener.
+- WSL on Windows: prefers `wslview` when installed, then falls back to the Windows URL handler.
+- macOS: uses Python's platform browser opener, which delegates to the system default browser.
+- Linux desktop: uses Python's platform browser opener, usually through `xdg-open` or the configured `BROWSER`.
+- Headless Linux, SSH, containers, and remote servers: automatic browser opening may not be possible. Use `driveops-mcp auth login` from a machine with browser access, set `DRIVEOPS_BROWSER`, or run a hosted HTTPS MCP deployment with a proper web OAuth flow.
 
 HTTP:
 

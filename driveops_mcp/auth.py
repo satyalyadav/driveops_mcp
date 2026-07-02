@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import sys
 import webbrowser
 from pathlib import Path
 from typing import Literal
@@ -24,6 +27,25 @@ WRITE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
+
+
+class _CommandBrowser(webbrowser.BaseBrowser):
+    def __init__(self, command: list[str]) -> None:
+        self.command = command
+
+    def open(
+        self,
+        url: str,
+        new: int = 0,
+        autoraise: bool = True,
+    ) -> bool:
+        del new, autoraise
+        subprocess.Popen(
+            [*self.command, url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
 
 
 def config_dir() -> Path:
@@ -70,6 +92,42 @@ def scopes_for_profile(profile: ScopeProfile | None = None) -> list[str]:
     return READONLY_SCOPES
 
 
+def _browser_name() -> str | None:
+    if browser := os.environ.get("DRIVEOPS_BROWSER"):
+        return browser
+    if shutil.which("wslview"):
+        webbrowser.register(
+            "driveops-wslview",
+            None,
+            _CommandBrowser(["wslview"]),
+            preferred=True,
+        )
+        return "driveops-wslview"
+    if shutil.which("rundll32.exe"):
+        webbrowser.register(
+            "driveops-windows-url",
+            None,
+            _CommandBrowser(["rundll32.exe", "url.dll,FileProtocolHandler"]),
+            preferred=True,
+        )
+        return "driveops-windows-url"
+    if shutil.which("explorer.exe"):
+        webbrowser.register(
+            "driveops-windows",
+            None,
+            _CommandBrowser(["explorer.exe"]),
+            preferred=True,
+        )
+        return "driveops-windows"
+    return None
+
+
+def profile_from_name(value: str | None) -> ScopeProfile:
+    if value and value.strip().lower() in {"write", "full", "rw"}:
+        return "write"
+    return "readonly"
+
+
 def require_write_profile() -> None:
     if scope_profile() != "write":
         raise PermissionError(
@@ -78,7 +136,47 @@ def require_write_profile() -> None:
         )
 
 
-def get_credentials(profile: ScopeProfile | None = None) -> Credentials:
+def auth_status(profile: ScopeProfile | None = None) -> dict[str, object]:
+    profile = profile or scope_profile()
+    token = token_path()
+    secret = client_secret_path()
+    token_valid = False
+    has_required_scopes = False
+    if token.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(
+                str(token), scopes_for_profile(profile)
+            )
+            token_valid = creds.valid
+            has_required_scopes = creds.has_scopes(scopes_for_profile(profile))
+        except ValueError:
+            token_valid = False
+            has_required_scopes = False
+    return {
+        "profile": profile,
+        "client_secret_path": str(secret),
+        "client_secret_present": secret.exists(),
+        "token_path": str(token),
+        "token_present": token.exists(),
+        "token_valid": token_valid,
+        "has_required_scopes": has_required_scopes,
+        "scopes": scopes_for_profile(profile),
+    }
+
+
+def logout() -> bool:
+    token = token_path()
+    existed = token.exists()
+    token.unlink(missing_ok=True)
+    return existed
+
+
+def get_credentials(
+    profile: ScopeProfile | None = None,
+    *,
+    force_reauth: bool = False,
+    show_auth_url: bool = False,
+) -> Credentials:
     """Load or mint Google OAuth credentials.
 
     This function is intentionally not called at import time. MCP clients can list
@@ -91,8 +189,12 @@ def get_credentials(profile: ScopeProfile | None = None) -> Credentials:
     token.parent.mkdir(parents=True, exist_ok=True)
 
     creds: Credentials | None = None
-    if token.exists():
+    if force_reauth:
+        token.unlink(missing_ok=True)
+    elif token.exists():
         creds = Credentials.from_authorized_user_file(str(token), scopes)
+        if not creds.has_scopes(scopes):
+            creds = None
 
     if creds and creds.valid:
         return creds
@@ -114,14 +216,15 @@ def get_credentials(profile: ScopeProfile | None = None) -> Credentials:
         )
 
     flow = InstalledAppFlow.from_client_secrets_file(str(secret), scopes)
-    auth_url, _ = flow.authorization_url(
+    print("Opening browser for Google authorization...", file=sys.stderr)
+    prompt_message = "Please visit this URL to authorize DriveOps MCP: {url}"
+    creds = flow.run_local_server(
+        port=0,
+        authorization_prompt_message=prompt_message if show_auth_url else None,
+        browser=_browser_name(),
         access_type="offline",
         prompt="consent",
-        include_granted_scopes=True,
+        include_granted_scopes="true",
     )
-    print("Opening browser for Google authorization...")
-    print(f"If it does not open, visit:\n{auth_url}\n")
-    webbrowser.open(auth_url)
-    creds = flow.run_local_server(port=0)
     token.write_text(creds.to_json(), encoding="utf-8")
     return creds

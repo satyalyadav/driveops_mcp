@@ -52,6 +52,19 @@ Read-only scopes are used by default. Write tools require:
 export DRIVEOPS_SCOPE_PROFILE=write
 ```
 
+Check or start local auth from a terminal:
+
+```bash
+driveops-mcp auth status
+driveops-mcp auth login
+```
+
+For write testing:
+
+```bash
+DRIVEOPS_SCOPE_PROFILE=write driveops-mcp auth login --profile write --force
+```
+
 Local state defaults to:
 
 ```text

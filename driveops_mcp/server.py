@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 from typing import Any, Callable
 
 from mcp.server import MCPServer
 
 from . import __version__
 from .audit import AuditStore
-from .auth import require_write_profile
+from .auth import auth_status, get_credentials, logout, profile_from_name, require_write_profile
 from .google_drive import GoogleDriveClient
 from .planner import DriveOpsPlanner
 from .schemas import OrganizationStrategy
@@ -188,11 +189,33 @@ def main(argv: list[str] | None = None) -> None:
     http = sub.add_parser("http", help="Run the MCP server over Streamable HTTP.")
     http.add_argument("--host", default="127.0.0.1")
     http.add_argument("--port", type=int, default=8787)
+    auth = sub.add_parser("auth", help="Manage local Google OAuth for DriveOps.")
+    auth_sub = auth.add_subparsers(dest="auth_command")
+    auth_status_parser = auth_sub.add_parser("status", help="Show local auth status.")
+    auth_status_parser.add_argument("--profile", choices=["readonly", "write"])
+    auth_login = auth_sub.add_parser("login", help="Open browser sign-in and save a token.")
+    auth_login.add_argument("--profile", choices=["readonly", "write"], default=None)
+    auth_login.add_argument("--force", action="store_true", help="Discard existing token first.")
+    auth_logout = auth_sub.add_parser("logout", help="Remove the saved local token.")
+    auth_logout.add_argument("--yes", action="store_true", help="Confirm token removal.")
     args = parser.parse_args(argv)
     if args.command in {None, "stdio"}:
         run_stdio()
     elif args.command == "http":
         run_http(host=args.host, port=args.port)
+    elif args.command == "auth":
+        if args.auth_command in {None, "status"}:
+            profile = profile_from_name(getattr(args, "profile", None))
+            print(json.dumps(auth_status(profile), indent=2))
+        elif args.auth_command == "login":
+            profile = profile_from_name(args.profile)
+            get_credentials(profile, force_reauth=args.force, show_auth_url=True)
+            print(json.dumps(auth_status(profile), indent=2))
+        elif args.auth_command == "logout":
+            if not args.yes:
+                parser.error("auth logout requires --yes")
+            removed = logout()
+            print(json.dumps({"token_removed": removed}, indent=2))
     else:
         parser.error(f"Unknown command: {args.command}")
 
