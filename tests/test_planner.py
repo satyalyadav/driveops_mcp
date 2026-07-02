@@ -34,7 +34,7 @@ class FakeDrive:
 
     def list_folder(self, folder_id_or_name: str, page_size: int = 1000) -> dict:
         children = list(self.files.values()) + list(self.folders.values())
-        return {"folder": self.folder, "count": len(children), "files": [dict(x) for x in children]}
+        return {"folder": self.folder, "count": len(children), "has_more": False, "files": [dict(x) for x in children]}
 
     def find_child_folder(self, parent_id: str, name: str) -> dict | None:
         for folder in self.folders.values():
@@ -152,3 +152,42 @@ def test_latest_plan_shortcuts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert applied["plan_id"] == plan["plan_id"]
     undone = planner.undo_plan(confirmation=preview["undo_confirmation"])
     assert undone["plan_id"] == plan["plan_id"]
+
+
+def test_plan_response_is_compact_by_default(tmp_path: Path) -> None:
+    drive = FakeDrive()
+    for index in range(25):
+        file_id = f"extra_{index}"
+        drive.files[file_id] = {
+            "id": file_id,
+            "name": f"extra-{index}.txt",
+            "mimeType": "text/plain",
+            "createdTime": "2026-06-01T00:00:00",
+            "modifiedTime": "2026-06-01T00:00:00",
+            "parents": ["folder_root"],
+        }
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+
+    plan = planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_name_prefix")
+    preview = planner.preview_plan(plan["plan_id"], max_steps=5)
+    full = planner.preview_plan(plan["plan_id"], detail="full")
+
+    assert plan["steps_truncated"] is True
+    assert preview["steps_total"] > preview["steps_returned"]
+    assert preview["steps_returned"] == 5
+    assert full["steps_truncated"] is False
+    assert full["steps_returned"] == full["steps_total"]
+    assert preview["step_groups"]
+
+
+def test_plan_refuses_incomplete_folder_listing(tmp_path: Path) -> None:
+    class LargeFakeDrive(FakeDrive):
+        def list_folder(self, folder_id_or_name: str, page_size: int = 1000) -> dict:
+            result = super().list_folder(folder_id_or_name, page_size)
+            result["has_more"] = True
+            return result
+
+    planner = DriveOpsPlanner(LargeFakeDrive(), store(tmp_path))
+
+    with pytest.raises(ValueError, match="more than 1000 items"):
+        planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_created_month")

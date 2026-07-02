@@ -24,6 +24,14 @@ class DriveOpsError(RuntimeError):
     pass
 
 
+class AmbiguousFileError(DriveOpsError):
+    def __init__(self, file_name: str, matches: list[dict[str, Any]], has_more: bool = False) -> None:
+        super().__init__(f"Multiple files named '{file_name}' found.")
+        self.file_name = file_name
+        self.matches = matches
+        self.has_more = has_more
+
+
 class GoogleDriveClient:
     def __init__(self, drive_service: Any | None = None, sheets_service: Any | None = None) -> None:
         if drive_service is None:
@@ -41,19 +49,34 @@ class GoogleDriveClient:
     def _looks_like_id(value: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z0-9_-]{10,}", value or ""))
 
-    def _execute_files_list(self, **params: Any) -> list[dict[str, Any]]:
+    def _execute_files_page(self, *, max_items: int | None = None, **params: Any) -> tuple[list[dict[str, Any]], bool]:
         items: list[dict[str, Any]] = []
         page_token = params.pop("pageToken", None)
+        has_more = False
         while True:
             call_params = dict(params)
+            if max_items is not None:
+                remaining = max_items - len(items)
+                if remaining <= 0:
+                    has_more = bool(page_token)
+                    break
+                requested = int(call_params.get("pageSize", remaining))
+                call_params["pageSize"] = max(1, min(requested, remaining))
             if page_token:
                 call_params["pageToken"] = page_token
             resp = self.drive.files().list(**call_params).execute()
             items.extend(resp.get("files", []))
             page_token = resp.get("nextPageToken")
+            if max_items is not None and len(items) >= max_items:
+                has_more = bool(page_token)
+                break
             if not page_token:
                 break
-        return items
+        return items[:max_items] if max_items is not None else items, has_more
+
+    def _execute_files_list(self, **params: Any) -> list[dict[str, Any]]:
+        files, _ = self._execute_files_page(**params)
+        return files
 
     def get_file(self, file_id: str, fields: str | None = None) -> dict[str, Any]:
         fields = fields or "id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink"
@@ -73,15 +96,9 @@ class GoogleDriveClient:
             except Exception:
                 pass
 
-        safe = self._escape(value)
-        exact = self._execute_files_list(
-            q=f"name = '{safe}' and trashed = false",
-            pageSize=5,
-            fields="files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            corpora="allDrives",
-        )
+        exact, has_more = self._exact_file_matches(value)
+        if len(exact) > 1:
+            raise AmbiguousFileError(value, self.enrich_files(exact), has_more)
         if exact:
             return exact[0]
         search = self.search_files(query=value, page_size=1)
@@ -90,10 +107,24 @@ class GoogleDriveClient:
             return files[0]
         raise DriveOpsError(f"File '{file_id_or_name}' not found.")
 
+    def _exact_file_matches(self, value: str, max_matches: int = 6) -> tuple[list[dict[str, Any]], bool]:
+        safe = self._escape(value)
+        return self._execute_files_page(
+            max_items=max_matches,
+            q=f"name = '{safe}' and trashed = false",
+            pageSize=max_matches,
+            fields="files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives",
+        )
+
     def resolve_folder(self, folder_id_or_name: str) -> dict[str, Any]:
         value = folder_id_or_name.strip()
         if not value:
             raise DriveOpsError("folder_id_or_name is required.")
+        if value.lower() in {"root", "my drive", "drive", "/"}:
+            return {"id": "root", "name": "My Drive", "mimeType": GOOGLE_FOLDER_MIME, "parents": []}
         if self._looks_like_id(value):
             folder = self.get_file(value, fields="id,name,mimeType,parents")
             if folder.get("mimeType") != GOOGLE_FOLDER_MIME:
@@ -101,7 +132,7 @@ class GoogleDriveClient:
             return folder
 
         cleaned = value
-        if cleaned.lower().startswith("my "):
+        if cleaned.lower().startswith("my ") and cleaned.lower() != "my drive":
             cleaned = cleaned[3:].strip()
         if cleaned.lower().endswith(" folder"):
             cleaned = cleaned[:-7].strip()
@@ -185,7 +216,8 @@ class GoogleDriveClient:
                 if token_clauses:
                     clauses.insert(0, "(" + " and ".join(token_clauses) + ")")
 
-        files = self._execute_files_list(
+        files, has_more = self._execute_files_page(
+            max_items=page_size,
             q=" and ".join(clauses),
             pageSize=page_size,
             fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
@@ -196,20 +228,23 @@ class GoogleDriveClient:
         return {
             "query": query,
             "count": len(files),
-            "files": self.enrich_files(files[:page_size]),
+            "has_more": has_more,
+            "files": self.enrich_files(files),
         }
 
     def list_folder(self, folder_id_or_name: str, page_size: int = 100) -> dict[str, Any]:
         folder = self.resolve_folder(folder_id_or_name)
-        files = self._execute_files_list(
+        page_size = max(1, min(int(page_size), 1000))
+        files, has_more = self._execute_files_page(
+            max_items=page_size,
             q=f"'{folder['id']}' in parents and trashed = false",
-            pageSize=max(1, min(int(page_size), 1000)),
+            pageSize=page_size,
             fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             corpora="allDrives",
         )
-        return {"folder": folder, "count": len(files), "files": self.enrich_files(files)}
+        return {"folder": folder, "count": len(files), "has_more": has_more, "files": self.enrich_files(files)}
 
     def get_changes(self, folder_id_or_name: str, since: str, page_size: int = 100) -> dict[str, Any]:
         folder = self.resolve_folder(folder_id_or_name)
@@ -219,9 +254,11 @@ class GoogleDriveClient:
         except ValueError as exc:
             raise DriveOpsError("since must be an ISO date like YYYY-MM-DD.") from exc
         since_str = since_dt.strftime("%Y-%m-%dT00:00:00")
-        files = self._execute_files_list(
+        page_size = max(1, min(int(page_size), 1000))
+        files, has_more = self._execute_files_page(
+            max_items=page_size,
             q=f"'{folder['id']}' in parents and modifiedTime >= '{since_str}' and trashed = false",
-            pageSize=max(1, min(int(page_size), 1000)),
+            pageSize=page_size,
             fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
@@ -231,10 +268,21 @@ class GoogleDriveClient:
         enriched = self.enrich_files(files)
         for item in enriched:
             item["changeType"] = "new" if (item.get("createdTime") or "") >= since_str else "edited"
-        return {"folder": folder, "since": since, "count": len(enriched), "changedFiles": enriched}
+        return {"folder": folder, "since": since, "count": len(enriched), "has_more": has_more, "changedFiles": enriched}
 
     def read_file(self, file_id_or_name: str, export_format: str | None = None, max_text_bytes: int = 200_000) -> dict[str, Any]:
-        resolved = self.resolve_file(file_id_or_name)
+        try:
+            resolved = self.resolve_file(file_id_or_name)
+        except AmbiguousFileError as exc:
+            return {
+                "status": "ambiguous",
+                "contentType": "ambiguous",
+                "text": None,
+                "name": exc.file_name,
+                "matches": exc.matches,
+                "has_more": exc.has_more,
+                "message": "Multiple files matched this name. Ask the user to choose one by path, modified time, or file ID.",
+            }
         file_id = resolved["id"]
         meta = self.get_file(file_id, fields="id,name,mimeType,size,webViewLink,webContentLink")
         mime = meta.get("mimeType", "")
@@ -315,7 +363,8 @@ class GoogleDriveClient:
 
     def find_child_folder(self, parent_id: str, name: str) -> dict[str, Any] | None:
         safe = self._escape(name)
-        files = self._execute_files_list(
+        files, _ = self._execute_files_page(
+            max_items=1,
             q=f"'{parent_id}' in parents and name = '{safe}' and mimeType = '{GOOGLE_FOLDER_MIME}' and trashed = false",
             pageSize=1,
             fields="files(id,name,mimeType,parents)",

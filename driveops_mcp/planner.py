@@ -18,6 +18,9 @@ from .schemas import (
 )
 
 
+MAX_PLAN_ITEMS = 1000
+
+
 def target_folder_name(file: dict[str, Any], strategy: OrganizationStrategy) -> str:
     if strategy == "by_created_month":
         return (file.get("createdTime") or "unknown")[:7] or "unknown"
@@ -57,7 +60,12 @@ class DriveOpsPlanner:
         strategy: OrganizationStrategy,
         dry_run: bool = True,
     ) -> dict[str, Any]:
-        listing = self.drive.list_folder(folder_id_or_name, page_size=1000)
+        listing = self.drive.list_folder(folder_id_or_name, page_size=MAX_PLAN_ITEMS)
+        if listing.get("has_more"):
+            raise ValueError(
+                f"Folder has more than {MAX_PLAN_ITEMS} items. "
+                "Refine the request or organize a smaller folder to avoid an incomplete plan."
+            )
         folder = listing["folder"]
         children = listing["files"]
         existing_folders = {
@@ -134,10 +142,43 @@ class DriveOpsPlanner:
             after=plan["summary"],
             message=f"Created {strategy} organization plan.",
         )
-        return plan
+        return self._plan_response(plan)
 
-    def preview_plan(self, plan_id: str | None = None) -> dict[str, Any]:
+    def preview_plan(
+        self,
+        plan_id: str | None = None,
+        *,
+        detail: str = "summary",
+        max_steps: int = 20,
+    ) -> dict[str, Any]:
         plan = self.audit.get_plan(plan_id) if plan_id else self.audit.latest_plan()
+        return self._plan_response(plan, detail=detail, max_steps=max_steps)
+
+    @staticmethod
+    def _step_groups(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        groups: dict[str, dict[str, Any]] = {}
+        for step in steps:
+            if step["type"] == "create_folder":
+                key = step["folder_name"]
+                group = groups.setdefault(key, {"target": key, "folders_to_create": 0, "files_to_move": 0})
+                group["folders_to_create"] += 1
+            elif step["type"] == "move_file":
+                key = step["target_folder_name"]
+                group = groups.setdefault(key, {"target": key, "folders_to_create": 0, "files_to_move": 0})
+                group["files_to_move"] += 1
+        return sorted(groups.values(), key=lambda item: item["target"])
+
+    def _plan_response(
+        self,
+        plan: dict[str, Any],
+        *,
+        detail: str = "summary",
+        max_steps: int = 20,
+    ) -> dict[str, Any]:
+        steps = plan["steps"]
+        max_steps = max(0, min(int(max_steps), 200))
+        include_full = detail == "full"
+        visible_steps = steps if include_full else steps[:max_steps]
         return {
             "plan_id": plan["plan_id"],
             "status": plan["status"],
@@ -146,7 +187,11 @@ class DriveOpsPlanner:
             "summary": plan["summary"],
             "confirmation": plan["confirmation"],
             "undo_confirmation": plan["undo_confirmation"],
-            "steps": plan["steps"],
+            "steps_total": len(steps),
+            "steps_returned": len(visible_steps),
+            "steps_truncated": len(visible_steps) < len(steps),
+            "step_groups": self._step_groups(steps),
+            "steps": visible_steps,
         }
 
     def apply_plan(self, *, plan_id: str | None = None, confirmation: str) -> dict[str, Any]:

@@ -112,11 +112,15 @@ def build_server() -> MCPServer:
 
     @mcp.tool(
         name="driveops.preview_plan",
-        description="Preview a stored DriveOps plan and retrieve confirmation strings. Omit plan_id to preview the latest plan.",
+        description="Preview a stored DriveOps plan and retrieve confirmation strings. Omit plan_id to preview the latest plan. Use detail='full' only when every step is needed.",
         structured_output=True,
     )
-    def preview_plan(plan_id: str | None = None) -> dict[str, Any]:
-        return _planner().preview_plan(plan_id)
+    def preview_plan(
+        plan_id: str | None = None,
+        detail: str = "summary",
+        max_steps: int = 20,
+    ) -> dict[str, Any]:
+        return _planner().preview_plan(plan_id, detail=detail, max_steps=max_steps)
 
     @mcp.tool(
         name="driveops.apply_plan",
@@ -200,9 +204,15 @@ def main(argv: list[str] | None = None) -> None:
     auth_logout.add_argument("--yes", action="store_true", help="Confirm token removal.")
     args = parser.parse_args(argv)
     if args.command in {None, "stdio"}:
-        run_stdio()
+        try:
+            run_stdio()
+        except KeyboardInterrupt:
+            return
     elif args.command == "http":
-        run_http(host=args.host, port=args.port)
+        try:
+            run_http(host=args.host, port=args.port)
+        except KeyboardInterrupt:
+            return
     elif args.command == "auth":
         if args.auth_command in {None, "status"}:
             profile = profile_from_name(getattr(args, "profile", None))

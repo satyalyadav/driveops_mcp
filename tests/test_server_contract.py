@@ -20,6 +20,7 @@ async def test_mcp_lists_expected_tools(tmp_path):
         tools = await client.list_tools()
     names = {tool.name for tool in tools.tools}
     assert "drive.search_files" in names
+    assert "drive.get_changes" in names
     assert "driveops.plan_organize_folder" in names
     assert "gdrive_search" in names
 
