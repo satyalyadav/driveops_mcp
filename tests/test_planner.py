@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from driveops_mcp.audit import AuditStore
-from driveops_mcp.planner import DriveOpsPlanner, target_folder_name
+from driveops_mcp.planner import DEFAULT_ARCHIVE_FOLDER, DriveOpsPlanner, target_folder_name
 from driveops_mcp.schemas import GOOGLE_FOLDER_MIME
 
 
@@ -191,3 +191,139 @@ def test_plan_refuses_incomplete_folder_listing(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="more than 1000 items"):
         planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_created_month")
+
+
+def test_hygiene_report_flags_common_drive_clutter(tmp_path: Path) -> None:
+    drive = FakeDrive()
+    drive.folder = {"id": "root", "name": "My Drive", "mimeType": GOOGLE_FOLDER_MIME}
+    drive.files.update(
+        {
+            "dup_old": {
+                "id": "dup_old",
+                "name": "Budget.xlsx",
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "createdTime": "2025-01-01T00:00:00+00:00",
+                "modifiedTime": "2025-01-01T00:00:00+00:00",
+                "parents": ["root"],
+            },
+            "dup_new": {
+                "id": "dup_new",
+                "name": "Budget.xlsx",
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "createdTime": "2026-01-01T00:00:00+00:00",
+                "modifiedTime": "2026-02-01T00:00:00+00:00",
+                "parents": ["root"],
+            },
+            "video": {
+                "id": "video",
+                "name": "vacation.mov",
+                "mimeType": "video/quicktime",
+                "createdTime": "2026-01-01T00:00:00+00:00",
+                "modifiedTime": "2026-02-01T00:00:00+00:00",
+                "size": str(250 * 1024 * 1024),
+                "parents": ["root"],
+            },
+            "tax": {
+                "id": "tax",
+                "name": "2025 tax return.pdf",
+                "mimeType": "application/pdf",
+                "createdTime": "2026-01-01T00:00:00+00:00",
+                "modifiedTime": "2026-02-01T00:00:00+00:00",
+                "parents": ["root"],
+            },
+        }
+    )
+    drive.folders["old_folder"] = {
+        "id": "old_folder",
+        "name": "Old Project",
+        "mimeType": GOOGLE_FOLDER_MIME,
+        "modifiedTime": "2020-01-01T00:00:00+00:00",
+        "parents": ["root"],
+    }
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+
+    report = planner.hygiene_report(folder_id_or_name="My Drive", stale_days=30, large_mb=100)
+
+    assert report["status"] == "ok"
+    assert report["summary"]["loose_root_files"] == 6
+    assert report["summary"]["duplicate_name_groups"] == 1
+    assert report["summary"]["stale_folders"] == 1
+    assert report["summary"]["large_binaries"] == 1
+    assert report["summary"]["sensitive_looking_docs"] == 1
+    assert report["summary"]["unmanaged_media"] == 1
+    assert {plan["tool"] for plan in report["suggested_plans"]} == {
+        "driveops.plan_duplicate_cleanup",
+        "driveops.plan_organize_folder",
+    }
+
+
+def test_duplicate_cleanup_plan_archives_older_duplicates_and_versions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = FakeDrive()
+    drive.files.update(
+        {
+            "resume_base": {
+                "id": "resume_base",
+                "name": "Resume.pdf",
+                "mimeType": "application/pdf",
+                "createdTime": "2026-01-01T00:00:00+00:00",
+                "modifiedTime": "2026-01-10T00:00:00+00:00",
+                "parents": ["folder_root"],
+            },
+            "resume_latest": {
+                "id": "resume_latest",
+                "name": "Resume latest.pdf",
+                "mimeType": "application/pdf",
+                "createdTime": "2026-01-01T00:00:00+00:00",
+                "modifiedTime": "2026-03-10T00:00:00+00:00",
+                "parents": ["folder_root"],
+            },
+            "notes_old": {
+                "id": "notes_old",
+                "name": "Notes.txt",
+                "mimeType": "text/plain",
+                "createdTime": "2026-01-01T00:00:00+00:00",
+                "modifiedTime": "2026-01-10T00:00:00+00:00",
+                "parents": ["folder_root"],
+            },
+            "notes_new": {
+                "id": "notes_new",
+                "name": "Notes.txt",
+                "mimeType": "text/plain",
+                "createdTime": "2026-01-01T00:00:00+00:00",
+                "modifiedTime": "2026-04-10T00:00:00+00:00",
+                "parents": ["folder_root"],
+            },
+        }
+    )
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+
+    plan = planner.plan_duplicate_cleanup(folder_id_or_name="Root")
+    preview = planner.preview_plan(plan["plan_id"])
+    result = planner.apply_plan(plan_id=plan["plan_id"], confirmation=preview["confirmation"])
+
+    assert plan["strategy"] == "duplicate_cleanup"
+    assert plan["summary"]["files_to_archive"] == 2
+    assert plan["summary"]["files_to_delete"] == 0
+    assert plan["steps"][0]["folder_name"] == DEFAULT_ARCHIVE_FOLDER
+    assert result["status"] == "applied"
+    archive_id = f"folder_{DEFAULT_ARCHIVE_FOLDER}"
+    assert drive.files["resume_base"]["parents"] == [archive_id]
+    assert drive.files["resume_latest"]["parents"] == ["folder_root"]
+    assert drive.files["notes_old"]["parents"] == [archive_id]
+    assert drive.files["notes_new"]["parents"] == ["folder_root"]
+
+
+def test_duplicate_cleanup_no_changes_does_not_store_empty_plan(tmp_path: Path) -> None:
+    planner = DriveOpsPlanner(FakeDrive(), store(tmp_path))
+
+    result = planner.plan_duplicate_cleanup(folder_id_or_name="Root")
+
+    assert result["status"] == "no_changes"
+    assert result["plan_id"] is None
+    assert result["summary"]["files_to_archive"] == 0
+    with pytest.raises(KeyError, match="No DriveOps plan"):
+        planner.preview_plan()

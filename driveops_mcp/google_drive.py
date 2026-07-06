@@ -79,7 +79,7 @@ class GoogleDriveClient:
         return files
 
     def get_file(self, file_id: str, fields: str | None = None) -> dict[str, Any]:
-        fields = fields or "id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink"
+        fields = fields or "id,name,mimeType,createdTime,modifiedTime,size,parents,webViewLink,webContentLink"
         return self.drive.files().get(
             fileId=file_id,
             fields=fields,
@@ -113,7 +113,7 @@ class GoogleDriveClient:
             max_items=max_matches,
             q=f"name = '{safe}' and trashed = false",
             pageSize=max_matches,
-            fields="files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
+            fields="files(id,name,mimeType,createdTime,modifiedTime,size,parents,webViewLink,webContentLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             corpora="allDrives",
@@ -220,7 +220,7 @@ class GoogleDriveClient:
             max_items=page_size,
             q=" and ".join(clauses),
             pageSize=page_size,
-            fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
+            fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,size,parents,webViewLink,webContentLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             corpora="allDrives",
@@ -239,7 +239,7 @@ class GoogleDriveClient:
             max_items=page_size,
             q=f"'{folder['id']}' in parents and trashed = false",
             pageSize=page_size,
-            fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
+            fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,size,parents,webViewLink,webContentLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             corpora="allDrives",
@@ -259,7 +259,7 @@ class GoogleDriveClient:
             max_items=page_size,
             q=f"'{folder['id']}' in parents and modifiedTime >= '{since_str}' and trashed = false",
             pageSize=page_size,
-            fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,webContentLink)",
+            fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,size,parents,webViewLink,webContentLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             corpora="allDrives",

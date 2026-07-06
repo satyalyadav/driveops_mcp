@@ -40,6 +40,7 @@ def normalize_file(item: dict) -> dict:
         "mimeType": item.get("mimeType"),
         "createdTime": item.get("createdTime"),
         "modifiedTime": item.get("modifiedTime"),
+        "size": item.get("size"),
         "parents": item.get("parents", []),
         "webViewLink": item.get("webViewLink"),
         "webContentLink": item.get("webContentLink"),

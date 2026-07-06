@@ -9,6 +9,8 @@ Google's Drive MCP server provides raw Drive tools such as search, read, create,
 DriveOps MCP adds safe operations over Drive:
 
 - plans before writes;
+- hygiene reports before cleanup;
+- duplicate/version archive plans without default deletion;
 - confirmations;
 - stale-plan checks;
 - undo;

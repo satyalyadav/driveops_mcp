@@ -6,11 +6,12 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 from typing import Literal
 
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -27,6 +28,13 @@ WRITE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
+
+AUTH_REFRESH_ATTEMPTS = 3
+AUTH_REFRESH_RETRY_DELAYS_SECONDS = (0.5, 1.5)
+
+
+class AuthRefreshTransientError(RuntimeError):
+    pass
 
 
 class _CommandBrowser(webbrowser.BaseBrowser):
@@ -171,6 +179,27 @@ def logout() -> bool:
     return existed
 
 
+def _refresh_expired_credentials(creds: Credentials, request: Request) -> None:
+    for attempt in range(1, AUTH_REFRESH_ATTEMPTS + 1):
+        try:
+            creds.refresh(request)
+            return
+        except TransportError as exc:
+            if attempt >= AUTH_REFRESH_ATTEMPTS:
+                raise AuthRefreshTransientError(
+                    "Google OAuth token refresh failed after "
+                    f"{AUTH_REFRESH_ATTEMPTS} attempts due to a transient network "
+                    "or DNS error. Check connectivity and retry."
+                ) from exc
+            delay = AUTH_REFRESH_RETRY_DELAYS_SECONDS[attempt - 1]
+            print(
+                "Google OAuth token refresh hit a transient network/DNS error; "
+                f"retrying in {delay:g}s ({attempt + 1}/{AUTH_REFRESH_ATTEMPTS}).",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+
 def get_credentials(
     profile: ScopeProfile | None = None,
     *,
@@ -201,7 +230,7 @@ def get_credentials(
 
     if creds and creds.expired and creds.refresh_token:
         try:
-            creds.refresh(Request())
+            _refresh_expired_credentials(creds, Request())
             token.write_text(creds.to_json(), encoding="utf-8")
             return creds
         except RefreshError:

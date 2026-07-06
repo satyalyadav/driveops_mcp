@@ -115,6 +115,40 @@ def build_server() -> MCPServer:
         )
 
     @mcp.tool(
+        name="driveops.hygiene_report",
+        description="Summarize Drive clutter in a folder: loose root files, duplicate names, version-like files, stale folders, large binaries, sensitive-looking docs, and unmanaged media. This never mutates Drive.",
+        structured_output=True,
+    )
+    def hygiene_report(
+        folder_id_or_name: str = "My Drive",
+        page_size: int = 1000,
+        stale_days: int = 365,
+        large_mb: int = 100,
+    ) -> dict[str, Any]:
+        return _planner().hygiene_report(
+            folder_id_or_name=folder_id_or_name,
+            page_size=page_size,
+            stale_days=stale_days,
+            large_mb=large_mb,
+        )
+
+    @mcp.tool(
+        name="driveops.plan_duplicate_cleanup",
+        description="Create a safe plan that archives older duplicate-name and version-like files into a review folder. It never deletes files and never mutates Drive until apply_plan is approved.",
+        structured_output=True,
+    )
+    def plan_duplicate_cleanup(
+        folder_id_or_name: str,
+        archive_folder_name: str = "DriveOps Review - Duplicates",
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        return _planner().plan_duplicate_cleanup(
+            folder_id_or_name=folder_id_or_name,
+            archive_folder_name=archive_folder_name,
+            dry_run=dry_run,
+        )
+
+    @mcp.tool(
         name="driveops.preview_plan",
         description="Preview a stored DriveOps plan and retrieve confirmation strings. Omit plan_id to preview the latest plan. Use detail='full' only when every step is needed.",
         structured_output=True,

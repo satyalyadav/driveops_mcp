@@ -22,7 +22,9 @@ async def test_mcp_lists_expected_tools(tmp_path):
     names = {tool.name for tool in tools.tools}
     assert "drive.search_files" in names
     assert "drive.get_changes" in names
+    assert "driveops.hygiene_report" in names
     assert "driveops.plan_organize_folder" in names
+    assert "driveops.plan_duplicate_cleanup" in names
     assert "gdrive_search" in names
 
 
@@ -40,6 +42,23 @@ async def test_mcp_can_call_plan_tool(tmp_path):
         )
     assert result.structured_content["status"] == "planned"
     assert result.structured_content["summary"]["files_to_move"] == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_can_call_hygiene_report(tmp_path):
+    drive = FakeDrive()
+    set_factories(
+        drive_factory=lambda: drive,
+        store_factory=lambda: AuditStore(tmp_path / "driveops.db"),
+    )
+    async with Client(build_server()) as client:
+        result = await client.call_tool(
+            "driveops.hygiene_report",
+            {"folder_id_or_name": "Root"},
+        )
+
+    assert result.structured_content["status"] == "ok"
+    assert "duplicate_name_groups" in result.structured_content["summary"]
 
 
 @pytest.mark.asyncio

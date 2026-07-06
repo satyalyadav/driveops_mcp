@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from driveops_mcp import auth
 
 
@@ -79,6 +81,90 @@ def test_get_credentials_restores_existing_oauthlib_scope_env(
     auth.get_credentials()
 
     assert auth.os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] == "existing"
+
+
+def test_get_credentials_retries_transient_refresh_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "token.json"
+    token.write_text('{"token": "old"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+
+    sleeps = []
+    monkeypatch.setattr(auth.time, "sleep", lambda delay: sleeps.append(delay))
+
+    class FakeCredentials:
+        valid = False
+        expired = True
+        refresh_token = "refresh-token"
+
+        def __init__(self) -> None:
+            self.refresh_calls = 0
+
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            assert path == str(token)
+            assert scopes == auth.READONLY_SCOPES
+            return fake_creds
+
+        def has_scopes(self, scopes):
+            return scopes == auth.READONLY_SCOPES
+
+        def refresh(self, request):
+            self.refresh_calls += 1
+            if self.refresh_calls == 1:
+                raise auth.TransportError("temporary DNS failure")
+            self.valid = True
+            self.expired = False
+
+        def to_json(self) -> str:
+            return '{"token": "new"}'
+
+    fake_creds = FakeCredentials()
+    monkeypatch.setattr(auth, "Credentials", FakeCredentials)
+
+    creds = auth.get_credentials()
+
+    assert creds is fake_creds
+    assert fake_creds.refresh_calls == 2
+    assert sleeps == [0.5]
+    assert token.read_text() == '{"token": "new"}'
+
+
+def test_get_credentials_keeps_token_after_transient_refresh_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "token.json"
+    token.write_text('{"token": "old"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+    monkeypatch.setattr(auth.time, "sleep", lambda delay: None)
+
+    class FakeCredentials:
+        valid = False
+        expired = True
+        refresh_token = "refresh-token"
+        refresh_calls = 0
+
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            return cls()
+
+        def has_scopes(self, scopes):
+            return True
+
+        def refresh(self, request):
+            type(self).refresh_calls += 1
+            raise auth.TransportError("temporary DNS failure")
+
+    monkeypatch.setattr(auth, "Credentials", FakeCredentials)
+
+    with pytest.raises(auth.AuthRefreshTransientError, match="failed after 3 attempts"):
+        auth.get_credentials()
+
+    assert FakeCredentials.refresh_calls == 3
+    assert token.read_text() == '{"token": "old"}'
 
 
 def test_browser_name_prefers_wslview(monkeypatch) -> None:

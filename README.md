@@ -11,6 +11,8 @@ Google's official Drive MCP server already exposes raw Drive tools such as searc
 DriveOps MCP adds:
 
 - plan-preview-approve-apply-undo workflows;
+- Drive hygiene reports for clutter, duplicate names, stale folders, large binaries, sensitive-looking filenames, and unmanaged media;
+- duplicate/version cleanup plans that archive older candidates without deleting files by default;
 - SQLite audit logs for every write step;
 - stale-plan checks before moving files;
 - local stdio and Streamable HTTP transports;
@@ -104,7 +106,9 @@ Read/search:
 
 Safe DriveOps:
 
+- `driveops.hygiene_report`
 - `driveops.plan_organize_folder`
+- `driveops.plan_duplicate_cleanup`
 - `driveops.preview_plan`
 - `driveops.apply_plan`
 - `driveops.undo_plan`
@@ -131,6 +135,14 @@ Read the file named "June application notes" from Drive. If there are multiple m
 
 ```text
 List my "Applications" folder and tell me which files look stale.
+```
+
+```text
+Run a Drive hygiene report on My Drive. Tell me what looks messy and what cleanup plans you recommend.
+```
+
+```text
+Find duplicate or version-looking files in my "Applications" folder and create a safe archive plan. Do not delete anything.
 ```
 
 ```text
