@@ -43,6 +43,10 @@ def _planner() -> DriveOpsPlanner:
     return DriveOpsPlanner(_drive_factory(), _store_factory())
 
 
+def _local_planner() -> DriveOpsPlanner:
+    return DriveOpsPlanner(None, _store_factory())
+
+
 def build_server() -> MCPServer:
     mcp = MCPServer(
         name="driveops-mcp",
@@ -120,7 +124,7 @@ def build_server() -> MCPServer:
         detail: str = "summary",
         max_steps: int = 20,
     ) -> dict[str, Any]:
-        return _planner().preview_plan(plan_id, detail=detail, max_steps=max_steps)
+        return _local_planner().preview_plan(plan_id, detail=detail, max_steps=max_steps)
 
     @mcp.tool(
         name="driveops.apply_plan",

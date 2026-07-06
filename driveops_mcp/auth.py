@@ -218,13 +218,21 @@ def get_credentials(
     flow = InstalledAppFlow.from_client_secrets_file(str(secret), scopes)
     print("Opening browser for Google authorization...", file=sys.stderr)
     prompt_message = "Please visit this URL to authorize DriveOps MCP: {url}"
-    creds = flow.run_local_server(
-        port=0,
-        authorization_prompt_message=prompt_message if show_auth_url else None,
-        browser=_browser_name(),
-        access_type="offline",
-        prompt="consent",
-        include_granted_scopes="true",
-    )
+    previous_relax_scope = os.environ.get("OAUTHLIB_RELAX_TOKEN_SCOPE")
+    os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+    try:
+        creds = flow.run_local_server(
+            port=0,
+            authorization_prompt_message=prompt_message if show_auth_url else None,
+            browser=_browser_name(),
+            access_type="offline",
+            prompt="consent",
+            include_granted_scopes="true",
+        )
+    finally:
+        if previous_relax_scope is None:
+            os.environ.pop("OAUTHLIB_RELAX_TOKEN_SCOPE", None)
+        else:
+            os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = previous_relax_scope
     token.write_text(creds.to_json(), encoding="utf-8")
     return creds

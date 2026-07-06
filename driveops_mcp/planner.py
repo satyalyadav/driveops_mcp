@@ -49,9 +49,14 @@ def target_folder_name(file: dict[str, Any], strategy: OrganizationStrategy) -> 
 
 
 class DriveOpsPlanner:
-    def __init__(self, drive: GoogleDriveClient, audit_store: AuditStore) -> None:
+    def __init__(self, drive: GoogleDriveClient | None, audit_store: AuditStore) -> None:
         self.drive = drive
         self.audit = audit_store
+
+    def _drive(self) -> GoogleDriveClient:
+        if self.drive is None:
+            raise RuntimeError("Google Drive client is required for this operation.")
+        return self.drive
 
     def plan_organize_folder(
         self,
@@ -60,7 +65,8 @@ class DriveOpsPlanner:
         strategy: OrganizationStrategy,
         dry_run: bool = True,
     ) -> dict[str, Any]:
-        listing = self.drive.list_folder(folder_id_or_name, page_size=MAX_PLAN_ITEMS)
+        drive = self._drive()
+        listing = drive.list_folder(folder_id_or_name, page_size=MAX_PLAN_ITEMS)
         if listing.get("has_more"):
             raise ValueError(
                 f"Folder has more than {MAX_PLAN_ITEMS} items. "
@@ -210,8 +216,9 @@ class DriveOpsPlanner:
             for step in plan["steps"]:
                 if step["type"] != "create_folder":
                     continue
-                existing = self.drive.find_child_folder(step["parent_id"], step["folder_name"])
-                folder = existing or self.drive.create_folder(step["folder_name"], step["parent_id"])
+                drive = self._drive()
+                existing = drive.find_child_folder(step["parent_id"], step["folder_name"])
+                folder = existing or drive.create_folder(step["folder_name"], step["parent_id"])
                 step["created_folder_id"] = folder["id"]
                 step["status"] = "applied"
                 created_by_name[step["folder_name"]] = folder["id"]
@@ -227,7 +234,8 @@ class DriveOpsPlanner:
             for step in plan["steps"]:
                 if step["type"] != "move_file":
                     continue
-                current = self.drive.get_file(step["file_id"], fields="id,name,mimeType,parents,modifiedTime")
+                drive = self._drive()
+                current = drive.get_file(step["file_id"], fields="id,name,mimeType,parents,modifiedTime")
                 parents = current.get("parents", [])
                 if step["source_parent_id"] not in parents:
                     raise RuntimeError(
@@ -235,11 +243,11 @@ class DriveOpsPlanner:
                     )
                 target_id = step.get("target_folder_id") or created_by_name.get(step["target_folder_name"])
                 if not target_id:
-                    target = self.drive.find_child_folder(plan["folder"]["id"], step["target_folder_name"])
+                    target = drive.find_child_folder(plan["folder"]["id"], step["target_folder_name"])
                     if not target:
                         raise RuntimeError(f"Target folder {step['target_folder_name']} was not created.")
                     target_id = target["id"]
-                moved = self.drive.move_file(step["file_id"], target_id, step["source_parent_id"])
+                moved = drive.move_file(step["file_id"], target_id, step["source_parent_id"])
                 step["target_folder_id"] = target_id
                 step["after_parents"] = moved.get("parents", [])
                 step["status"] = "applied"
@@ -291,13 +299,14 @@ class DriveOpsPlanner:
                 target_id = step.get("target_folder_id")
                 if not target_id:
                     continue
-                current = self.drive.get_file(step["file_id"], fields="id,name,mimeType,parents,modifiedTime")
+                drive = self._drive()
+                current = drive.get_file(step["file_id"], fields="id,name,mimeType,parents,modifiedTime")
                 parents = current.get("parents", [])
                 if target_id not in parents:
                     raise RuntimeError(
                         f"Cannot undo: file {step['file_name']} is no longer in planned target folder."
                     )
-                moved = self.drive.move_file(step["file_id"], step["source_parent_id"], target_id)
+                moved = drive.move_file(step["file_id"], step["source_parent_id"], target_id)
                 step["undo_status"] = "undone"
                 undone += 1
                 self.audit.append_event(
