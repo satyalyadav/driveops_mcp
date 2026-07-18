@@ -166,6 +166,18 @@ class DriveOpsPlanner:
             elif kind in {"create_file", "upload_file"}:
                 name = str(action.get("name") or "").strip()
                 local_path = action.get("local_path")
+                content_sources = sum(
+                    value is not None
+                    for value in (
+                        action.get("text"),
+                        action.get("content_base64"),
+                        local_path,
+                    )
+                )
+                if content_sources > 1:
+                    raise ValueError(
+                        f"Action {index + 1} must provide only one of text, content_base64, or local_path."
+                    )
                 if kind == "upload_file" and not local_path:
                     raise ValueError(
                         f"Action {index + 1} upload_file requires local_path."
@@ -192,7 +204,6 @@ class DriveOpsPlanner:
                     str(action.get("parent_id_or_name") or "My Drive")
                 )
                 step.update(
-                    type="create_file",
                     file_name=name,
                     parent_id=parent["id"],
                     parent_name=parent.get("name"),
@@ -762,6 +773,8 @@ class DriveOpsPlanner:
             visible["content_base64"] = (
                 f"<redacted base64: {len(str(visible['content_base64']))} characters>"
             )
+        if visible.get("local_path") is not None:
+            visible["local_path"] = "<redacted local path>"
         return visible
 
     def _plan_response(
@@ -883,7 +896,7 @@ class DriveOpsPlanner:
                 drive = self._drive()
                 kind = step["type"]
                 before = step.get("before")
-                if kind == "create_file":
+                if kind in {"create_file", "upload_file"}:
                     if step.get("local_path") and step.get("source_snapshot"):
                         source = Path(step["local_path"]).expanduser()
                         if not source.is_file():
@@ -1036,6 +1049,7 @@ class DriveOpsPlanner:
                         raise RuntimeError(
                             f"Cannot undo: file {step['file_name']} is no longer in planned target folder."
                         )
+                    before = {"parents": parents}
                     after = drive.move_file(
                         step["file_id"], step["source_parent_id"], target_id
                     )
@@ -1044,7 +1058,7 @@ class DriveOpsPlanner:
                         continue
                     subject_id = step.get("created_folder_id")
                     after = drive.set_trashed(subject_id, True)
-                elif kind in {"create_file", "copy_file"}:
+                elif kind in {"create_file", "upload_file", "copy_file"}:
                     subject_id = step.get("created_file_id")
                     after = drive.set_trashed(subject_id, True)
                 elif kind == "rename_file":

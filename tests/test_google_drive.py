@@ -46,7 +46,7 @@ def test_read_file_resolves_name() -> None:
                                 "mimeType": "text/plain",
                                 "parents": ["root"],
                             }
-                        ]
+                        ],
                     }
 
             return Call()
@@ -196,22 +196,17 @@ def test_read_file_returns_ambiguity_for_duplicate_exact_names() -> None:
             class Call:
                 def execute(self):
                     return {
+                        "nextPageToken": "more-exact-matches",
                         "files": [
                             {
-                                "id": "dup_1",
+                                "id": f"dup_{index}",
                                 "name": "Notes",
                                 "mimeType": "text/plain",
                                 "parents": ["root"],
-                                "modifiedTime": "2026-01-01T00:00:00",
-                            },
-                            {
-                                "id": "dup_2",
-                                "name": "Notes",
-                                "mimeType": "text/plain",
-                                "parents": ["root"],
-                                "modifiedTime": "2026-02-01T00:00:00",
-                            },
-                        ]
+                                "modifiedTime": f"2026-01-0{index + 1}T00:00:00",
+                            }
+                            for index in range(6)
+                        ],
                     }
 
             return Call()
@@ -225,7 +220,9 @@ def test_read_file_returns_ambiguity_for_duplicate_exact_names() -> None:
     assert result["status"] == "ambiguous"
     assert result["contentType"] == "ambiguous"
     assert result["text"] is None
-    assert len(result["matches"]) == 2
+    assert len(result["matches"]) == 6
+    assert result["has_more"] is True
+    assert isinstance(result["has_more"], bool)
     assert "Multiple files matched" in result["message"]
 
 

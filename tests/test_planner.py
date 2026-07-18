@@ -337,6 +337,58 @@ def test_general_file_actions_apply_and_undo(
     assert drive.files["f1"]["name"] == "alpha-report.pdf"
     assert drive.files["f1"]["parents"] == ["folder_root"]
     assert drive.files["f2"]["trashed"] is False
+    events = planner.audit.list_events(plan_id=plan["plan_id"])
+    undo_move = next(event for event in events if event["action"] == "undo_move_file")
+    assert undo_move["before"] == {"parents": ["target"]}
+
+
+def test_upload_action_is_preserved_redacted_and_undoable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    source = tmp_path / "private-upload.txt"
+    source.write_text("upload body", encoding="utf-8")
+
+    plan = planner.plan_file_actions(
+        actions=[
+            {
+                "type": "upload_file",
+                "local_path": str(source),
+                "parent_id_or_name": "My Drive",
+            }
+        ]
+    )
+
+    assert plan["summary"]["action_counts"] == {"upload_file": 1}
+    assert plan["steps"][0]["type"] == "upload_file"
+    assert plan["steps"][0]["local_path"] == "<redacted local path>"
+    planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+    applied = planner.audit.get_plan(plan["plan_id"])
+    created_file_id = applied["steps"][0]["created_file_id"]
+    assert drive.files[created_file_id]["name"] == source.name
+
+    planner.undo_plan(plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"])
+    assert drive.files[created_file_id]["trashed"] is True
+
+
+def test_file_action_plan_rejects_multiple_content_sources(tmp_path: Path) -> None:
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    source = tmp_path / "upload.txt"
+    source.write_text("upload body", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="only one"):
+        planner.plan_file_actions(
+            actions=[
+                {
+                    "type": "upload_file",
+                    "local_path": str(source),
+                    "text": "conflicting inline body",
+                }
+            ]
+        )
 
 
 def test_general_create_copy_share_and_redacted_preview(

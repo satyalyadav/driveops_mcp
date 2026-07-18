@@ -127,15 +127,16 @@ class GoogleDriveClient:
         self, value: str, max_matches: int = 6
     ) -> tuple[list[dict[str, Any]], bool]:
         safe = self._escape(value)
-        return self._execute_files_page(
+        files, next_page_token = self._execute_files_page(
             max_items=max_matches,
             q=f"name = '{safe}' and trashed = false",
             pageSize=max_matches,
-            fields="files(id,name,mimeType,createdTime,modifiedTime,size,parents,webViewLink,webContentLink)",
+            fields="nextPageToken, files(id,name,mimeType,createdTime,modifiedTime,size,parents,webViewLink,webContentLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             corpora="allDrives",
         )
+        return files, bool(next_page_token)
 
     def resolve_folder(self, folder_id_or_name: str) -> dict[str, Any]:
         value = folder_id_or_name.strip()
