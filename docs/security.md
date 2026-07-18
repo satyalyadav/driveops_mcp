@@ -4,10 +4,14 @@ DriveOps MCP is built around safe writes:
 
 - read-only OAuth scopes by default;
 - write tools require `DRIVEOPS_SCOPE_PROFILE=write`;
-- Drive mutations require a stored `plan_id`;
+- all Drive mutations, including file and permission actions, require a stored `plan_id`;
 - applying a plan requires the exact confirmation string from `driveops.preview_plan`;
 - undo requires the exact undo confirmation string;
-- every create/move/undo event is written to SQLite.
+- every create, upload, rename, copy, move, trash/delete, permission, and undo event is written to SQLite;
+- permanent-delete plans are labeled irreversible and cannot be undone;
+- partially applied plans remain undoable when a later batch action fails;
+- ZIP extraction blocks path traversal, symlinks, oversized expansion, and silent overwrite;
+- downloads refuse to overwrite local files unless explicitly requested.
 
 ## Secrets
 

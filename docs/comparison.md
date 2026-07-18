@@ -1,10 +1,10 @@
 # Comparison
 
-DriveOps MCP is not trying to win as a raw Google Drive connector.
+DriveOps MCP aims to be a free, portable Drive connector while retaining a safer operational model than direct API calls.
 
 ## Google Official Drive MCP Server
 
-Google's Drive MCP server provides raw Drive tools such as search, read, create, copy, download, permissions, and recent files. Use it when you want official Google-hosted Drive tool access.
+Google's Drive MCP server provides Google-hosted Drive access. DriveOps MCP provides the common file, transfer, permission, shared-drive, and change-feed operations through a self-hostable MCP server.
 
 DriveOps MCP adds safe operations over Drive:
 
@@ -24,9 +24,9 @@ DriveOps MCP is for external agents and self-hosted workflows.
 
 ## Google Workspace CLI
 
-`gws` is a broad CLI/API surface with structured output and agent skills. It is useful for direct Workspace API calls.
+`gws` is a broad CLI/API surface with structured output and agent skills. It remains broader across Workspace products such as Gmail and Calendar.
 
-DriveOps MCP is a workflow-oriented MCP server. It exposes fewer operations but adds safety and audit semantics.
+DriveOps MCP focuses on Drive and adds plan/preview/confirmation, undo, organization, hygiene, and audit semantics.
 
 ## ChatGPT and Claude Connectors
 

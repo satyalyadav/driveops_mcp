@@ -5,13 +5,21 @@ from pathlib import Path
 import pytest
 
 from driveops_mcp.audit import AuditStore
-from driveops_mcp.planner import DEFAULT_ARCHIVE_FOLDER, DriveOpsPlanner, target_folder_name
+from driveops_mcp.planner import (
+    DEFAULT_ARCHIVE_FOLDER,
+    DriveOpsPlanner,
+    target_folder_name,
+)
 from driveops_mcp.schemas import GOOGLE_FOLDER_MIME
 
 
 class FakeDrive:
     def __init__(self) -> None:
-        self.folder = {"id": "folder_root", "name": "Root", "mimeType": GOOGLE_FOLDER_MIME}
+        self.folder = {
+            "id": "folder_root",
+            "name": "Root",
+            "mimeType": GOOGLE_FOLDER_MIME,
+        }
         self.files = {
             "f1": {
                 "id": "f1",
@@ -34,7 +42,12 @@ class FakeDrive:
 
     def list_folder(self, folder_id_or_name: str, page_size: int = 1000) -> dict:
         children = list(self.files.values()) + list(self.folders.values())
-        return {"folder": self.folder, "count": len(children), "has_more": False, "files": [dict(x) for x in children]}
+        return {
+            "folder": self.folder,
+            "count": len(children),
+            "has_more": False,
+            "files": [dict(x) for x in children],
+        }
 
     def find_child_folder(self, parent_id: str, name: str) -> dict | None:
         for folder in self.folders.values():
@@ -44,7 +57,12 @@ class FakeDrive:
 
     def create_folder(self, name: str, parent_id: str) -> dict:
         folder_id = f"folder_{name}"
-        folder = {"id": folder_id, "name": name, "mimeType": GOOGLE_FOLDER_MIME, "parents": [parent_id]}
+        folder = {
+            "id": folder_id,
+            "name": name,
+            "mimeType": GOOGLE_FOLDER_MIME,
+            "parents": [parent_id],
+        }
         self.folders[folder_id] = folder
         return dict(folder)
 
@@ -64,6 +82,113 @@ class FakeDrive:
         return dict(file)
 
 
+class ActionFakeDrive(FakeDrive):
+    def __init__(self) -> None:
+        super().__init__()
+        self.folders["target"] = {
+            "id": "target",
+            "name": "Target",
+            "mimeType": GOOGLE_FOLDER_MIME,
+            "parents": ["folder_root"],
+        }
+        self.permissions = {
+            "perm1": {
+                "id": "perm1",
+                "type": "user",
+                "role": "reader",
+                "emailAddress": "old@example.com",
+            }
+        }
+        self.next_id = 1
+
+    def resolve_file(self, reference: str) -> dict:
+        if reference in self.files:
+            return dict(self.files[reference])
+        match = next(
+            (item for item in self.files.values() if item["name"] == reference), None
+        )
+        if match:
+            return dict(match)
+        raise KeyError(reference)
+
+    def resolve_folder(self, reference: str) -> dict:
+        if reference in {"My Drive", "root"}:
+            return {"id": "root", "name": "My Drive", "mimeType": GOOGLE_FOLDER_MIME}
+        if reference in {"folder_root", "Root"}:
+            return dict(self.folder)
+        if reference in self.folders:
+            return dict(self.folders[reference])
+        match = next(
+            (item for item in self.folders.values() if item["name"] == reference), None
+        )
+        if match:
+            return dict(match)
+        raise KeyError(reference)
+
+    def rename_file(self, file_id: str, new_name: str) -> dict:
+        self.files[file_id]["name"] = new_name
+        return dict(self.files[file_id])
+
+    def copy_file(
+        self, file_id: str, *, name: str | None = None, parent_id: str | None = None
+    ) -> dict:
+        source = self.files[file_id]
+        new_id = f"new{self.next_id}"
+        self.next_id += 1
+        copy = dict(
+            source,
+            id=new_id,
+            name=name or source["name"],
+            parents=[parent_id] if parent_id else list(source["parents"]),
+        )
+        self.files[new_id] = copy
+        return dict(copy)
+
+    def create_file(self, *, name: str, parent_id: str, **kwargs) -> dict:
+        new_id = f"new{self.next_id}"
+        self.next_id += 1
+        file = {
+            "id": new_id,
+            "name": name,
+            "mimeType": kwargs.get("mime_type") or "text/plain",
+            "parents": [parent_id],
+        }
+        self.files[new_id] = file
+        return dict(file)
+
+    def set_trashed(self, file_id: str, trashed: bool) -> dict:
+        collection = self.files if file_id in self.files else self.folders
+        collection[file_id]["trashed"] = trashed
+        return dict(collection[file_id])
+
+    def delete_file(self, file_id: str) -> dict:
+        del self.files[file_id]
+        return {"id": file_id, "deleted": True}
+
+    def get_permission(self, file_id: str, permission_id: str) -> dict:
+        return dict(self.permissions[permission_id])
+
+    def create_permission(self, file_id: str, **kwargs) -> dict:
+        permission_id = f"perm{len(self.permissions) + 1}"
+        permission = {
+            "id": permission_id,
+            "type": kwargs["permission_type"],
+            "role": kwargs["role"],
+            "emailAddress": kwargs.get("email_address"),
+            "domain": kwargs.get("domain"),
+        }
+        self.permissions[permission_id] = permission
+        return dict(permission)
+
+    def update_permission(self, file_id: str, permission_id: str, role: str) -> dict:
+        self.permissions[permission_id]["role"] = role
+        return dict(self.permissions[permission_id])
+
+    def delete_permission(self, file_id: str, permission_id: str) -> dict:
+        self.permissions.pop(permission_id)
+        return {"file_id": file_id, "permission_id": permission_id, "deleted": True}
+
+
 def store(tmp_path: Path) -> AuditStore:
     return AuditStore(tmp_path / "driveops.db")
 
@@ -81,7 +206,9 @@ def test_target_folder_name_strategies() -> None:
     assert target_folder_name(file, "by_name_prefix") == "alpha"
 
 
-def test_plan_preview_and_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_plan_preview_and_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
     drive = FakeDrive()
     planner = DriveOpsPlanner(drive, store(tmp_path))
@@ -92,9 +219,15 @@ def test_plan_preview_and_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     )
 
     assert plan["status"] == "planned"
-    assert plan["summary"] == {"files_seen": 2, "folders_to_create": 2, "files_to_move": 2}
+    assert plan["summary"] == {
+        "files_seen": 2,
+        "folders_to_create": 2,
+        "files_to_move": 2,
+    }
     preview = planner.preview_plan(plan["plan_id"])
-    result = planner.apply_plan(plan_id=plan["plan_id"], confirmation=preview["confirmation"])
+    result = planner.apply_plan(
+        plan_id=plan["plan_id"], confirmation=preview["confirmation"]
+    )
 
     assert result["status"] == "applied"
     assert drive.files["f1"]["parents"] == ["folder_2026-06"]
@@ -103,37 +236,51 @@ def test_plan_preview_and_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert any(e["action"] == "move_file" and e["status"] == "ok" for e in events)
 
 
-def test_apply_rejects_without_write_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_rejects_without_write_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "readonly")
     planner = DriveOpsPlanner(FakeDrive(), store(tmp_path))
-    plan = planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_created_month")
+    plan = planner.plan_organize_folder(
+        folder_id_or_name="folder_root", strategy="by_created_month"
+    )
 
     with pytest.raises(PermissionError):
         planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
 
 
-def test_apply_rejects_stale_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_rejects_stale_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
     drive = FakeDrive()
     planner = DriveOpsPlanner(drive, store(tmp_path))
-    plan = planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_created_month")
+    plan = planner.plan_organize_folder(
+        folder_id_or_name="folder_root", strategy="by_created_month"
+    )
     drive.files["f1"]["parents"] = ["somewhere_else"]
 
     with pytest.raises(RuntimeError, match="Stale plan"):
         planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
 
     failed = planner.audit.get_plan(plan["plan_id"])
-    assert failed["status"] == "failed"
+    assert failed["status"] == "partially_applied"
 
 
-def test_undo_restores_file_parents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_undo_restores_file_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
     drive = FakeDrive()
     planner = DriveOpsPlanner(drive, store(tmp_path))
-    plan = planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_created_month")
+    plan = planner.plan_organize_folder(
+        folder_id_or_name="folder_root", strategy="by_created_month"
+    )
     planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
 
-    result = planner.undo_plan(plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"])
+    result = planner.undo_plan(
+        plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+    )
 
     assert result["status"] == "undone"
     assert drive.files["f1"]["parents"] == ["folder_root"]
@@ -144,7 +291,9 @@ def test_latest_plan_shortcuts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
     drive = FakeDrive()
     planner = DriveOpsPlanner(drive, store(tmp_path))
-    plan = planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_mime_type")
+    plan = planner.plan_organize_folder(
+        folder_id_or_name="folder_root", strategy="by_mime_type"
+    )
 
     preview = planner.preview_plan()
     assert preview["plan_id"] == plan["plan_id"]
@@ -152,6 +301,123 @@ def test_latest_plan_shortcuts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert applied["plan_id"] == plan["plan_id"]
     undone = planner.undo_plan(confirmation=preview["undo_confirmation"])
     assert undone["plan_id"] == plan["plan_id"]
+
+
+def test_general_file_actions_apply_and_undo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+
+    plan = planner.plan_file_actions(
+        actions=[
+            {"type": "rename_file", "file_id_or_name": "f1", "new_name": "renamed.pdf"},
+            {
+                "type": "move_file",
+                "file_id_or_name": "f1",
+                "target_folder_id_or_name": "Target",
+            },
+            {"type": "trash_file", "file_id_or_name": "f2"},
+        ]
+    )
+    result = planner.apply_plan(
+        plan_id=plan["plan_id"], confirmation=plan["confirmation"]
+    )
+
+    assert result["status"] == "applied"
+    assert drive.files["f1"]["name"] == "renamed.pdf"
+    assert drive.files["f1"]["parents"] == ["target"]
+    assert drive.files["f2"]["trashed"] is True
+
+    undone = planner.undo_plan(
+        plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+    )
+    assert undone["status"] == "undone"
+    assert drive.files["f1"]["name"] == "alpha-report.pdf"
+    assert drive.files["f1"]["parents"] == ["folder_root"]
+    assert drive.files["f2"]["trashed"] is False
+
+
+def test_general_create_copy_share_and_redacted_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[
+            {"type": "create_file", "name": "hello.txt", "text": "private body"},
+            {"type": "copy_file", "file_id_or_name": "f1", "new_name": "copy.pdf"},
+            {
+                "type": "share_file",
+                "file_id_or_name": "f1",
+                "email_address": "person@example.com",
+                "role": "reader",
+            },
+        ]
+    )
+    assert plan["steps"][0]["text"].startswith("<redacted text:")
+
+    planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+    assert any(item["name"] == "hello.txt" for item in drive.files.values())
+    assert any(item["name"] == "copy.pdf" for item in drive.files.values())
+    assert any(
+        item.get("emailAddress") == "person@example.com"
+        for item in drive.permissions.values()
+    )
+
+    planner.undo_plan(plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"])
+    created = [
+        item
+        for item in drive.files.values()
+        if item["name"] in {"hello.txt", "copy.pdf"}
+    ]
+    assert all(item["trashed"] is True for item in created)
+    assert not any(
+        item.get("emailAddress") == "person@example.com"
+        for item in drive.permissions.values()
+    )
+
+
+def test_permanent_delete_plan_is_marked_irreversible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[{"type": "delete_file", "file_id_or_name": "f1"}]
+    )
+
+    assert plan["summary"]["irreversible_actions"] == 1
+    planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+    with pytest.raises(ValueError, match="cannot be undone"):
+        planner.undo_plan(
+            plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+        )
+
+
+def test_partially_applied_plan_can_be_undone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[
+            {"type": "rename_file", "file_id_or_name": "f1", "new_name": "first.pdf"},
+            {"type": "rename_file", "file_id_or_name": "f1", "new_name": "second.pdf"},
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="Stale plan"):
+        planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+    assert planner.audit.get_plan(plan["plan_id"])["status"] == "partially_applied"
+    assert drive.files["f1"]["name"] == "first.pdf"
+
+    planner.undo_plan(plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"])
+    assert drive.files["f1"]["name"] == "alpha-report.pdf"
 
 
 def test_plan_response_is_compact_by_default(tmp_path: Path) -> None:
@@ -168,7 +434,9 @@ def test_plan_response_is_compact_by_default(tmp_path: Path) -> None:
         }
     planner = DriveOpsPlanner(drive, store(tmp_path))
 
-    plan = planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_name_prefix")
+    plan = planner.plan_organize_folder(
+        folder_id_or_name="folder_root", strategy="by_name_prefix"
+    )
     preview = planner.preview_plan(plan["plan_id"], max_steps=5)
     full = planner.preview_plan(plan["plan_id"], detail="full")
 
@@ -190,7 +458,9 @@ def test_plan_refuses_incomplete_folder_listing(tmp_path: Path) -> None:
     planner = DriveOpsPlanner(LargeFakeDrive(), store(tmp_path))
 
     with pytest.raises(ValueError, match="more than 1000 items"):
-        planner.plan_organize_folder(folder_id_or_name="folder_root", strategy="by_created_month")
+        planner.plan_organize_folder(
+            folder_id_or_name="folder_root", strategy="by_created_month"
+        )
 
 
 def test_hygiene_report_flags_common_drive_clutter(tmp_path: Path) -> None:
@@ -242,7 +512,9 @@ def test_hygiene_report_flags_common_drive_clutter(tmp_path: Path) -> None:
     }
     planner = DriveOpsPlanner(drive, store(tmp_path))
 
-    report = planner.hygiene_report(folder_id_or_name="My Drive", stale_days=30, large_mb=100)
+    report = planner.hygiene_report(
+        folder_id_or_name="My Drive", stale_days=30, large_mb=100
+    )
 
     assert report["status"] == "ok"
     assert report["summary"]["loose_root_files"] == 6
@@ -303,7 +575,9 @@ def test_duplicate_cleanup_plan_archives_older_duplicates_and_versions(
 
     plan = planner.plan_duplicate_cleanup(folder_id_or_name="Root")
     preview = planner.preview_plan(plan["plan_id"])
-    result = planner.apply_plan(plan_id=plan["plan_id"], confirmation=preview["confirmation"])
+    result = planner.apply_plan(
+        plan_id=plan["plan_id"], confirmation=preview["confirmation"]
+    )
 
     assert plan["strategy"] == "duplicate_cleanup"
     assert plan["summary"]["files_to_archive"] == 2

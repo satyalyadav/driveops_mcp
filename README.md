@@ -1,18 +1,21 @@
 # DriveOps MCP
 
-DriveOps MCP is an open-source, model-agnostic Google Drive operations layer for AI agents. It is not another raw Drive connector. Google, ChatGPT, Claude, Gemini, and Google Workspace CLI already cover large parts of that space.
+DriveOps MCP is a free, open-source, model-agnostic Google Drive operations layer for AI agents. It combines the everyday Drive capabilities expected from a general connector—search, upload, download, file management, sharing, shared drives, and change tracking—with safe organization workflows that can run with any MCP-compatible LLM or infrastructure.
 
-DriveOps MCP focuses on a different job: **safe Drive operations**. Agents can search and read Drive, then propose file-organization plans, preview them, apply them only with explicit confirmation, undo applied moves, and inspect an audit log.
+All writes use **safe Drive operations**: agents first create a stored plan, preview it, apply it only with explicit confirmation, undo reversible actions, and inspect an audit log. Permanent deletion is clearly marked irreversible.
 
 ## Why This Exists
 
-Google's official Drive MCP server already exposes raw Drive tools such as search, read, create, copy, download, permissions, and recent files. Gemini in Drive adds native AI search and summaries. ChatGPT and Claude have their own Drive connectors. Those are useful, but they are tied to specific products and do not provide a portable, open, auditable DriveOps workflow.
+Official Drive tools and bundled AI features are often tied to a particular product, plan, or host. DriveOps MCP provides a portable, self-hostable alternative without removing the safety controls needed when an LLM can modify user files.
 
 DriveOps MCP adds:
 
 - plan-preview-approve-apply-undo workflows;
 - Drive hygiene reports for clutter, duplicate names, stale folders, large binaries, sensitive-looking filenames, and unmanaged media;
 - duplicate/version cleanup plans that archive older candidates without deleting files by default;
+- general file action plans for create/upload, rename, copy, move, trash/restore/delete, and sharing;
+- real downloads and Workspace exports, plus PDF/Office text and safe ZIP extraction;
+- permission inspection, shared-drive discovery, pagination, and the real Drive Changes feed;
 - SQLite audit logs for every write step;
 - stale-plan checks before moving files;
 - local stdio and Streamable HTTP transports;
@@ -102,13 +105,20 @@ Read/search:
 - `drive.search_files`
 - `drive.read_file` (accepts a file ID, exact filename, or search text)
 - `drive.list_folder`
-- `drive.get_changes`
+- `drive.download_file`
+- `drive.extract_file`
+- `drive.list_permissions`
+- `drive.list_shared_drives`
+- `drive.get_change_token`
+- `drive.list_changes`
+- `drive.get_changes` (legacy modified-since folder query)
 
 Safe DriveOps:
 
 - `driveops.hygiene_report`
 - `driveops.plan_organize_folder`
 - `driveops.plan_duplicate_cleanup`
+- `driveops.plan_file_actions`
 - `driveops.preview_plan`
 - `driveops.apply_plan`
 - `driveops.undo_plan`
@@ -120,6 +130,15 @@ Compatibility aliases:
 - `gdrive_read_file`
 
 The old direct destructive `gdrive_organize` tool is intentionally removed. Use `driveops.plan_organize_folder`, inspect the plan, then call `driveops.apply_plan` with the confirmation string.
+
+`driveops.plan_file_actions` supports these action types:
+
+- `create_folder`, `create_file`, `upload_file`;
+- `rename_file`, `copy_file`, `move_file`;
+- `trash_file`, `restore_file`, `delete_file`;
+- `share_file`, `update_permission`, `remove_permission`.
+
+`delete_file` permanently deletes and makes the entire plan non-undoable. Prefer `trash_file` for normal cleanup.
 
 ## Example Prompts
 
