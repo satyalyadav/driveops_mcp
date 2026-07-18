@@ -7,7 +7,7 @@ from mcp import Client
 from driveops_mcp.audit import AuditStore
 from driveops_mcp.server import build_server, set_factories
 from driveops_mcp.schemas import confirmation_for, now_iso, undo_confirmation_for
-from tests.test_planner import FakeDrive
+from tests.test_planner import ActionFakeDrive, FakeDrive
 
 
 @pytest.mark.asyncio
@@ -22,10 +22,23 @@ async def test_mcp_lists_expected_tools(tmp_path):
     names = {tool.name for tool in tools.tools}
     assert "drive.search_files" in names
     assert "drive.get_changes" in names
+    assert "drive.download_file" in names
+    assert "drive.extract_file" in names
+    assert "drive.list_permissions" in names
+    assert "drive.list_shared_drives" in names
+    assert "drive.get_change_token" in names
+    assert "drive.list_changes" in names
     assert "driveops.hygiene_report" in names
     assert "driveops.plan_organize_folder" in names
     assert "driveops.plan_duplicate_cleanup" in names
+    assert "driveops.plan_file_actions" in names
     assert "gdrive_search" in names
+    action_tool = next(
+        tool for tool in tools.tools if tool.name == "driveops.plan_file_actions"
+    )
+    action_schema = action_tool.input_schema["$defs"]["DriveFileAction"]
+    assert "delete_file" in action_schema["properties"]["type"]["enum"]
+    assert "permission_id" in action_schema["properties"]
 
 
 @pytest.mark.asyncio
@@ -59,6 +72,30 @@ async def test_mcp_can_call_hygiene_report(tmp_path):
 
     assert result.structured_content["status"] == "ok"
     assert "duplicate_name_groups" in result.structured_content["summary"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_can_plan_general_file_action(tmp_path):
+    drive = ActionFakeDrive()
+    set_factories(
+        drive_factory=lambda: drive,
+        store_factory=lambda: AuditStore(tmp_path / "driveops.db"),
+    )
+    async with Client(build_server()) as client:
+        result = await client.call_tool(
+            "driveops.plan_file_actions",
+            {
+                "actions": [
+                    {
+                        "type": "rename_file",
+                        "file_id_or_name": "f1",
+                        "new_name": "new-name.pdf",
+                    }
+                ]
+            },
+        )
+
+    assert result.structured_content["summary"]["action_counts"] == {"rename_file": 1}
 
 
 @pytest.mark.asyncio

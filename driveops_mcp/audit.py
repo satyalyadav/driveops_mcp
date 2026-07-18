@@ -85,26 +85,43 @@ class AuditStore:
 
     def get_plan(self, plan_id: str) -> dict[str, Any]:
         with self._connect() as conn:
-            row = conn.execute("select * from plans where id = ?", (plan_id,)).fetchone()
+            row = conn.execute(
+                "select * from plans where id = ?", (plan_id,)
+            ).fetchone()
         if row is None:
             raise KeyError(f"Plan {plan_id} not found.")
         return json.loads(row["plan_json"])
 
-    def latest_plan(self, *, status: str | None = None) -> dict[str, Any]:
+    def latest_plan(
+        self, *, status: str | None = None, statuses: set[str] | None = None
+    ) -> dict[str, Any]:
+        if status and statuses:
+            raise ValueError("Provide status or statuses, not both.")
         sql = "select * from plans"
         params: list[Any] = []
         if status:
             sql += " where status = ?"
             params.append(status)
+        elif statuses:
+            ordered = sorted(statuses)
+            sql += " where status in (" + ",".join("?" for _ in ordered) + ")"
+            params.extend(ordered)
         sql += " order by created_at desc limit 1"
         with self._connect() as conn:
             row = conn.execute(sql, params).fetchone()
         if row is None:
-            suffix = f" with status {status}" if status else ""
+            requested = status or ", ".join(sorted(statuses or []))
+            suffix = f" with status {requested}" if requested else ""
             raise KeyError(f"No DriveOps plan{suffix} found.")
         return json.loads(row["plan_json"])
 
-    def update_plan(self, plan: dict[str, Any], *, status: str | None = None, error: str | None = None) -> None:
+    def update_plan(
+        self,
+        plan: dict[str, Any],
+        *,
+        status: str | None = None,
+        error: str | None = None,
+    ) -> None:
         if status is not None:
             plan["status"] = status
         if error is not None:
@@ -170,7 +187,9 @@ class AuditStore:
             )
         return event
 
-    def list_events(self, *, limit: int = 50, plan_id: str | None = None) -> list[dict[str, Any]]:
+    def list_events(
+        self, *, limit: int = 50, plan_id: str | None = None
+    ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         sql = "select * from audit_events"
         params: list[Any] = []
@@ -190,8 +209,12 @@ class AuditStore:
                     "action": row["action"],
                     "status": row["status"],
                     "subject_id": row["subject_id"],
-                    "before": json.loads(row["before_json"]) if row["before_json"] else None,
-                    "after": json.loads(row["after_json"]) if row["after_json"] else None,
+                    "before": json.loads(row["before_json"])
+                    if row["before_json"]
+                    else None,
+                    "after": json.loads(row["after_json"])
+                    if row["after_json"]
+                    else None,
                     "message": row["message"],
                     "created_at": row["created_at"],
                 }

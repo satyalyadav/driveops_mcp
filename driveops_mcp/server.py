@@ -10,12 +10,18 @@ from mcp.server import MCPServer
 
 from . import __version__
 from .audit import AuditStore
-from .auth import auth_status, get_credentials, logout, profile_from_name, require_write_profile
+from .auth import (
+    auth_status,
+    get_credentials,
+    logout,
+    profile_from_name,
+    require_write_profile,
+)
 from .google_drive import GoogleDriveClient
 from .planner import DriveOpsPlanner
-from .schemas import OrganizationStrategy
+from .schemas import DriveFileAction, OrganizationStrategy
 
-INSTRUCTIONS = """DriveOps MCP is a safe Google Drive operations layer. Use read/search tools freely. For organization or writes, first create a plan, preview it, explain the proposed changes, and only then call apply with the confirmation string from the preview. Never invent confirmation strings. Undo uses the undo confirmation from preview. Prefer small folders and ask the user before broad Drive changes."""
+INSTRUCTIONS = """DriveOps MCP is a safe, general Google Drive operations layer. Use read, download, extraction, permission-listing, shared-drive, and change-feed tools freely. For every write, use driveops.plan_file_actions or an organization planner, preview it, explain the proposed changes and any irreversible actions, and only then call apply with the confirmation string from the preview. Never invent confirmation strings. Undo uses the undo confirmation from preview. Prefer trash over permanent delete, use small batches, and ask the user before broad Drive changes or sharing content."""
 
 _drive_factory: Callable[[], GoogleDriveClient] = GoogleDriveClient
 _store_factory: Callable[[], AuditStore] = AuditStore
@@ -66,12 +72,14 @@ def build_server() -> MCPServer:
         folder_id: str | None = None,
         mime_types: list[str] | None = None,
         page_size: int = 10,
+        page_token: str | None = None,
     ) -> dict[str, Any]:
         return _drive().search_files(
             query=query,
             folder_id=folder_id,
             mime_types=mime_types,
             page_size=page_size,
+            page_token=page_token,
         )
 
     @mcp.tool(
@@ -79,7 +87,9 @@ def build_server() -> MCPServer:
         description="Read a Google Drive file by ID, exact filename, or search text. Text is returned when safe; binary files return metadata and download hints.",
         structured_output=True,
     )
-    def read_file(file_id_or_name: str, export_format: str | None = None) -> dict[str, Any]:
+    def read_file(
+        file_id_or_name: str, export_format: str | None = None
+    ) -> dict[str, Any]:
         return _drive().read_file(file_id_or_name, export_format=export_format)
 
     @mcp.tool(
@@ -87,16 +97,132 @@ def build_server() -> MCPServer:
         description="Resolve a folder ID or name and list its immediate children.",
         structured_output=True,
     )
-    def list_folder(folder_id_or_name: str, page_size: int = 100) -> dict[str, Any]:
-        return _drive().list_folder(folder_id_or_name, page_size=page_size)
+    def list_folder(
+        folder_id_or_name: str, page_size: int = 100, page_token: str | None = None
+    ) -> dict[str, Any]:
+        return _drive().list_folder(
+            folder_id_or_name, page_size=page_size, page_token=page_token
+        )
 
     @mcp.tool(
         name="drive.get_changes",
         description="List files in a folder modified since an ISO date such as 2026-06-29.",
         structured_output=True,
     )
-    def get_changes(folder_id_or_name: str, since: str, page_size: int = 100) -> dict[str, Any]:
-        return _drive().get_changes(folder_id_or_name, since, page_size=page_size)
+    def get_changes(
+        folder_id_or_name: str,
+        since: str,
+        page_size: int = 100,
+        page_token: str | None = None,
+    ) -> dict[str, Any]:
+        return _drive().get_changes(
+            folder_id_or_name, since, page_size=page_size, page_token=page_token
+        )
+
+    @mcp.tool(
+        name="drive.download_file",
+        description="Download a blob file or export a Google Workspace file. Returns base64 bytes unless output_path is provided, in which case it saves on the MCP server host.",
+        structured_output=True,
+    )
+    def download_file(
+        file_id_or_name: str,
+        export_format: str | None = None,
+        output_path: str | None = None,
+        max_bytes: int = 25_000_000,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        return _drive().download_file(
+            file_id_or_name,
+            export_format=export_format,
+            output_path=output_path,
+            max_bytes=max_bytes,
+            overwrite=overwrite,
+        )
+
+    @mcp.tool(
+        name="drive.extract_file",
+        description="Extract text from Google Docs/Sheets/Slides, text, PDF, DOCX, PPTX, or XLSX files. ZIP files return a manifest or unpack safely when output_dir is provided.",
+        structured_output=True,
+    )
+    def extract_file(
+        file_id_or_name: str,
+        output_dir: str | None = None,
+        max_bytes: int = 50_000_000,
+        max_text_chars: int = 500_000,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        return _drive().extract_file(
+            file_id_or_name,
+            output_dir=output_dir,
+            max_bytes=max_bytes,
+            max_text_chars=max_text_chars,
+            overwrite=overwrite,
+        )
+
+    @mcp.tool(
+        name="drive.list_permissions",
+        description="List the users, groups, domains, and public links that can access a file or folder.",
+        structured_output=True,
+    )
+    def list_permissions(
+        file_id_or_name: str, page_size: int = 100, page_token: str | None = None
+    ) -> dict[str, Any]:
+        return _drive().list_permissions(
+            file_id_or_name, page_size=page_size, page_token=page_token
+        )
+
+    @mcp.tool(
+        name="drive.list_shared_drives",
+        description="List shared drives available to the authenticated account.",
+        structured_output=True,
+    )
+    def list_shared_drives(
+        page_size: int = 100, page_token: str | None = None
+    ) -> dict[str, Any]:
+        return _drive().list_shared_drives(page_size=page_size, page_token=page_token)
+
+    @mcp.tool(
+        name="drive.get_change_token",
+        description="Get a durable starting token for the real Google Drive Changes feed, optionally for one shared drive.",
+        structured_output=True,
+    )
+    def get_change_token(drive_id: str | None = None) -> dict[str, Any]:
+        return _drive().get_start_page_token(drive_id=drive_id)
+
+    @mcp.tool(
+        name="drive.list_changes",
+        description="Read the real Google Drive Changes feed, including removed or moved items. Begin with drive.get_change_token and persist the returned continuation token.",
+        structured_output=True,
+    )
+    def list_changes(
+        page_token: str,
+        drive_id: str | None = None,
+        page_size: int = 100,
+        include_removed: bool = True,
+    ) -> dict[str, Any]:
+        return _drive().list_changes(
+            page_token,
+            drive_id=drive_id,
+            page_size=page_size,
+            include_removed=include_removed,
+        )
+
+    @mcp.tool(
+        name="driveops.plan_file_actions",
+        description=(
+            "Plan one or more ordinary Drive writes without mutating Drive. Supported action types: "
+            "create_folder, create_file, upload_file, rename_file, copy_file, move_file, "
+            "trash_file, restore_file, delete_file, share_file, update_permission, remove_permission. "
+            "File actions use file_id_or_name; folder destinations use parent_id_or_name or "
+            "target_folder_id_or_name. Preview and apply with driveops.apply_plan. Permanent delete is irreversible."
+        ),
+        structured_output=True,
+    )
+    def plan_file_actions(
+        actions: list[DriveFileAction], dry_run: bool = True
+    ) -> dict[str, Any]:
+        normalized = [action.model_dump() for action in actions]
+        return _planner().plan_file_actions(actions=normalized, dry_run=dry_run)
 
     @mcp.tool(
         name="driveops.plan_organize_folder",
@@ -158,7 +284,9 @@ def build_server() -> MCPServer:
         detail: str = "summary",
         max_steps: int = 20,
     ) -> dict[str, Any]:
-        return _local_planner().preview_plan(plan_id, detail=detail, max_steps=max_steps)
+        return _local_planner().preview_plan(
+            plan_id, detail=detail, max_steps=max_steps
+        )
 
     @mcp.tool(
         name="driveops.apply_plan",
@@ -183,7 +311,9 @@ def build_server() -> MCPServer:
         description="List DriveOps audit events, optionally scoped to a plan.",
         structured_output=True,
     )
-    def list_audit_events(limit: int = 50, plan_id: str | None = None) -> dict[str, Any]:
+    def list_audit_events(
+        limit: int = 50, plan_id: str | None = None
+    ) -> dict[str, Any]:
         events = _store_factory().list_events(limit=limit, plan_id=plan_id)
         return {"count": len(events), "events": events}
 
@@ -235,11 +365,17 @@ def main(argv: list[str] | None = None) -> None:
     auth_sub = auth.add_subparsers(dest="auth_command")
     auth_status_parser = auth_sub.add_parser("status", help="Show local auth status.")
     auth_status_parser.add_argument("--profile", choices=["readonly", "write"])
-    auth_login = auth_sub.add_parser("login", help="Open browser sign-in and save a token.")
+    auth_login = auth_sub.add_parser(
+        "login", help="Open browser sign-in and save a token."
+    )
     auth_login.add_argument("--profile", choices=["readonly", "write"], default=None)
-    auth_login.add_argument("--force", action="store_true", help="Discard existing token first.")
+    auth_login.add_argument(
+        "--force", action="store_true", help="Discard existing token first."
+    )
     auth_logout = auth_sub.add_parser("logout", help="Remove the saved local token.")
-    auth_logout.add_argument("--yes", action="store_true", help="Confirm token removal.")
+    auth_logout.add_argument(
+        "--yes", action="store_true", help="Confirm token removal."
+    )
     args = parser.parse_args(argv)
     if args.command in {None, "stdio"}:
         try:
