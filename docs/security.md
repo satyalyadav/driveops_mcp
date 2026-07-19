@@ -10,8 +10,11 @@ DriveOps MCP is built around safe writes:
 - every create, upload, rename, copy, move, trash/delete, permission, and undo event is written to SQLite;
 - permanent-delete plans are labeled irreversible and cannot be undone;
 - partially applied plans remain undoable when a later batch action fails;
+- plan application and undo are atomically claimed so concurrent requests cannot execute the same plan twice;
+- partial undo progress is stored step-by-step and safely skipped when an undo is retried;
 - ZIP extraction blocks path traversal, symlinks, oversized expansion, and silent overwrite;
 - downloads refuse to overwrite local files unless explicitly requested.
+- OAuth tokens and the local audit database use owner-only permissions on POSIX systems.
 
 ## Secrets
 

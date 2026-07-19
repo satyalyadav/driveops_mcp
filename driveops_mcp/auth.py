@@ -86,6 +86,19 @@ def token_path() -> Path:
     ).expanduser()
 
 
+def _secure_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        path.chmod(0o700)
+
+
+def _write_private_text(path: Path, content: str) -> None:
+    path.touch(mode=0o600, exist_ok=True)
+    if os.name != "nt":
+        path.chmod(0o600)
+    path.write_text(content, encoding="utf-8")
+
+
 def scope_profile() -> ScopeProfile:
     raw = os.environ.get("DRIVEOPS_SCOPE_PROFILE", "readonly").strip().lower()
     if raw in {"write", "full", "rw"}:
@@ -215,7 +228,9 @@ def get_credentials(
     scopes = scopes_for_profile(profile)
     token = token_path()
     secret = client_secret_path()
-    token.parent.mkdir(parents=True, exist_ok=True)
+    _secure_directory(token.parent)
+    if token.exists() and os.name != "nt":
+        token.chmod(0o600)
 
     creds: Credentials | None = None
     if force_reauth:
@@ -231,7 +246,7 @@ def get_credentials(
     if creds and creds.expired and creds.refresh_token:
         try:
             _refresh_expired_credentials(creds, Request())
-            token.write_text(creds.to_json(), encoding="utf-8")
+            _write_private_text(token, creds.to_json())
             return creds
         except RefreshError:
             token.unlink(missing_ok=True)
@@ -263,5 +278,5 @@ def get_credentials(
             os.environ.pop("OAUTHLIB_RELAX_TOKEN_SCOPE", None)
         else:
             os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = previous_relax_scope
-    token.write_text(creds.to_json(), encoding="utf-8")
+    _write_private_text(token, creds.to_json())
     return creds

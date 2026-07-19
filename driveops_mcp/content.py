@@ -200,9 +200,14 @@ def download_name(name: str, content_type: str) -> str:
 
 def download_request(request: Any, max_bytes: int) -> bytes:
     output = io.BytesIO()
-    downloader = MediaIoBaseDownload(output, request)
+    max_bytes = max(1, int(max_bytes))
+    downloader = MediaIoBaseDownload(
+        output,
+        request,
+        chunksize=min(max_bytes, 1024 * 1024),
+    )
     done = False
-    while not done and output.tell() <= max_bytes:
+    while not done and output.tell() < max_bytes:
         _, done = downloader.next_chunk()
     return output.getvalue()
 

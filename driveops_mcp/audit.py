@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -16,10 +17,17 @@ class AuditStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or state_dir() / "driveops.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            self.db_path.parent.chmod(0o700)
+        self.db_path.touch(mode=0o600, exist_ok=True)
+        if os.name != "nt":
+            self.db_path.chmod(0o600)
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
+        if os.name != "nt":
+            self.db_path.chmod(0o600)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -142,6 +150,47 @@ class AuditStore:
                     plan["plan_id"],
                 ),
             )
+
+    def claim_plan(
+        self,
+        plan_id: str,
+        *,
+        expected_statuses: set[str],
+        claimed_status: str,
+    ) -> dict[str, Any]:
+        """Atomically claim a plan before executing external side effects."""
+
+        if not expected_statuses:
+            raise ValueError("expected_statuses must not be empty.")
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                "select status, plan_json from plans where id = ?", (plan_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Plan {plan_id} not found.")
+            if row["status"] not in expected_statuses:
+                expected = ", ".join(sorted(expected_statuses))
+                raise ValueError(
+                    f"Plan {plan_id} is {row['status']}; expected one of: {expected}."
+                )
+            plan = json.loads(row["plan_json"])
+            plan["status"] = claimed_status
+            plan["updated_at"] = now_iso()
+            conn.execute(
+                """
+                update plans
+                set status = ?, updated_at = ?, plan_json = ?, error = null
+                where id = ?
+                """,
+                (
+                    claimed_status,
+                    plan["updated_at"],
+                    json.dumps(plan, sort_keys=True),
+                    plan_id,
+                ),
+            )
+        return plan
 
     def append_event(
         self,

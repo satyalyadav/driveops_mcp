@@ -7,7 +7,7 @@ from typing import Any
 from googleapiclient.discovery import build
 
 from .auth import get_credentials
-from .errors import AmbiguousFileError, DriveOpsError
+from .errors import AmbiguousFileError, AmbiguousFolderError, DriveOpsError
 from .google_access import GoogleAccessMixin
 from .google_files import GoogleFilesMixin
 
@@ -24,4 +24,9 @@ class GoogleDriveClient(GoogleFilesMixin, GoogleAccessMixin):
         self.sheets = sheets_service
 
 
-__all__ = ["AmbiguousFileError", "DriveOpsError", "GoogleDriveClient"]
+__all__ = [
+    "AmbiguousFileError",
+    "AmbiguousFolderError",
+    "DriveOpsError",
+    "GoogleDriveClient",
+]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -47,6 +49,8 @@ def test_get_credentials_uses_google_lowercase_include_granted_scopes(
     assert seen_kwargs["include_granted_scopes"] == "true"
     assert seen_kwargs["browser"] == "test-browser"
     assert token.read_text() == '{"token": "fake"}'
+    if os.name != "nt":
+        assert stat.S_IMODE(token.stat().st_mode) == 0o600
     assert "OAUTHLIB_RELAX_TOKEN_SCOPE" not in auth.os.environ
 
 
@@ -169,7 +173,11 @@ def test_get_credentials_keeps_token_after_transient_refresh_failure(
 
 def test_browser_name_prefers_wslview(monkeypatch) -> None:
     monkeypatch.delenv("DRIVEOPS_BROWSER", raising=False)
-    monkeypatch.setattr(auth.shutil, "which", lambda command: "/usr/bin/wslview" if command == "wslview" else None)
+    monkeypatch.setattr(
+        auth.shutil,
+        "which",
+        lambda command: "/usr/bin/wslview" if command == "wslview" else None,
+    )
 
     assert auth._browser_name() == "driveops-wslview"
 

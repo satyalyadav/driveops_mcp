@@ -19,7 +19,7 @@ from .content import (
     download_request,
     extract_content,
 )
-from .errors import AmbiguousFileError, DriveOpsError
+from .errors import AmbiguousFileError, AmbiguousFolderError, DriveOpsError
 from .schemas import (
     GOOGLE_DOC_MIME,
     GOOGLE_FOLDER_MIME,
@@ -39,7 +39,10 @@ class GoogleFilesMixin:
 
     @staticmethod
     def _looks_like_id(value: str) -> bool:
-        return bool(re.fullmatch(r"[A-Za-z0-9_-]{10,}", value or ""))
+        return bool(
+            re.fullmatch(r"[A-Za-z0-9_-]{10,}", value or "")
+            and (len(value) >= 20 or "_" in value or "-" in value)
+        )
 
     def _execute_files_page(
         self, *, max_items: int | None = None, **params: Any
@@ -143,19 +146,29 @@ class GoogleFilesMixin:
         if cleaned.lower().endswith(" folder"):
             cleaned = cleaned[:-7].strip()
         safe = self._escape(cleaned)
-        candidates = self._execute_files_list(
+        candidates, next_page_token = self._execute_files_page(
+            max_items=6,
             q=f"name contains '{safe}' and mimeType = '{GOOGLE_FOLDER_MIME}' and trashed = false",
-            pageSize=10,
-            fields="files(id,name,mimeType,parents)",
+            pageSize=6,
+            fields="nextPageToken,files(id,name,mimeType,parents,modifiedTime,webViewLink)",
             includeItemsFromAllDrives=True,
             supportsAllDrives=True,
             corpora="allDrives",
         )
-        for item in candidates:
-            if item.get("name", "").lower() == cleaned.lower():
-                return item
-        if candidates:
-            return candidates[0]
+        exact = [
+            item
+            for item in candidates
+            if item.get("name", "").casefold() == cleaned.casefold()
+        ]
+        matches = exact or candidates
+        if len(matches) > 1 or (matches and next_page_token):
+            raise AmbiguousFolderError(
+                folder_id_or_name,
+                self.enrich_files(matches),
+                bool(next_page_token),
+            )
+        if matches:
+            return matches[0]
         raise DriveOpsError(f"Folder '{folder_id_or_name}' not found.")
 
     def folder_path(self, parent_id: str, cache: dict[str, str] | None = None) -> str:

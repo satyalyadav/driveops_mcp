@@ -6,7 +6,12 @@ import zipfile
 
 import pytest
 
-from driveops_mcp.google_drive import DriveOpsError, GoogleDriveClient
+from driveops_mcp import content
+from driveops_mcp.google_drive import (
+    AmbiguousFolderError,
+    DriveOpsError,
+    GoogleDriveClient,
+)
 
 
 def test_binary_read_returns_download_hint() -> None:
@@ -80,12 +85,14 @@ def test_read_file_resolves_name() -> None:
 
 
 def test_resolve_folder_rejects_non_folder_id() -> None:
+    folder_id = "abc1234567890123456789"
+
     class Files:
         def get(self, **kwargs):
             class Call:
                 def execute(self):
                     return {
-                        "id": "abc123456789",
+                        "id": folder_id,
                         "name": "Doc",
                         "mimeType": "text/plain",
                     }
@@ -98,11 +105,49 @@ def test_resolve_folder_rejects_non_folder_id() -> None:
 
     client = GoogleDriveClient(drive_service=Service())
     try:
-        client.resolve_folder("abc123456789")
+        client.resolve_folder(folder_id)
     except Exception as exc:
         assert "not a Google Drive folder" in str(exc)
     else:
         raise AssertionError("Expected resolve_folder to reject a non-folder ID")
+
+
+def test_resolve_folder_rejects_ambiguous_names() -> None:
+    class Call:
+        def execute(self):
+            return {
+                "files": [
+                    {
+                        "id": "folder_one_12345",
+                        "name": "Applications",
+                        "mimeType": "application/vnd.google-apps.folder",
+                        "parents": ["root"],
+                    },
+                    {
+                        "id": "folder_two_12345",
+                        "name": "Applications",
+                        "mimeType": "application/vnd.google-apps.folder",
+                        "parents": ["root"],
+                    },
+                ]
+            }
+
+    class Files:
+        def list(self, **kwargs):
+            return Call()
+
+    class Service:
+        def files(self):
+            return Files()
+
+    client = GoogleDriveClient(drive_service=Service())
+
+    with pytest.raises(AmbiguousFolderError) as error:
+        client.resolve_folder("Applications")
+
+    assert len(error.value.matches) == 2
+    assert "folder_one_12345" in str(error.value)
+    assert "Use a folder ID" in str(error.value)
 
 
 def test_search_files_respects_page_size_and_reports_more() -> None:
@@ -252,6 +297,26 @@ def test_download_file_returns_real_base64_bytes() -> None:
 
     assert base64.b64decode(result["content_base64"]) == b"actual-bytes"
     assert result["size"] == 12
+
+
+def test_download_request_bounds_transport_chunk_size(monkeypatch) -> None:
+    observed: dict[str, int] = {}
+
+    class Downloader:
+        def __init__(self, output, request, chunksize):
+            observed["chunksize"] = chunksize
+            self.output = output
+
+        def next_chunk(self):
+            self.output.write(b"x" * observed["chunksize"])
+            return None, True
+
+    monkeypatch.setattr(content, "MediaIoBaseDownload", Downloader)
+
+    result = content.download_request(object(), 257)
+
+    assert observed["chunksize"] == 257
+    assert len(result) == 257
 
 
 def test_download_file_refuses_to_overwrite(tmp_path) -> None:

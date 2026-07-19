@@ -806,20 +806,23 @@ class DriveOpsPlanner:
         self, *, plan_id: str | None = None, confirmation: str
     ) -> dict[str, Any]:
         require_write_profile()
-        plan = (
+        preview = (
             self.audit.get_plan(plan_id)
             if plan_id
             else self.audit.latest_plan(status="planned")
         )
-        plan_id = plan["plan_id"]
-        if plan["status"] != "planned":
+        plan_id = preview["plan_id"]
+        if preview["status"] != "planned":
             raise ValueError(
-                f"Plan {plan_id} is {plan['status']}; only planned plans can be applied."
+                f"Plan {plan_id} is {preview['status']}; only planned plans can be applied."
             )
-        if confirmation != plan["confirmation"]:
+        if confirmation != preview["confirmation"]:
             raise ValueError("Confirmation string does not match plan preview.")
-        if not plan["steps"]:
+        if not preview["steps"]:
             raise ValueError("Refusing to apply an empty plan.")
+        plan = self.audit.claim_plan(
+            plan_id, expected_statuses={"planned"}, claimed_status="applying"
+        )
 
         created_by_name: dict[str, str] = {}
         try:
@@ -1005,30 +1008,36 @@ class DriveOpsPlanner:
         self, *, plan_id: str | None = None, confirmation: str
     ) -> dict[str, Any]:
         require_write_profile()
-        plan = (
+        undoable_statuses = {"applied", "partially_applied", "partially_undone"}
+        preview = (
             self.audit.get_plan(plan_id)
             if plan_id
-            else self.audit.latest_plan(statuses={"applied", "partially_applied"})
+            else self.audit.latest_plan(statuses=undoable_statuses)
         )
-        plan_id = plan["plan_id"]
-        if plan["status"] not in {"applied", "partially_applied"}:
+        plan_id = preview["plan_id"]
+        if preview["status"] not in undoable_statuses:
             raise ValueError(
-                f"Plan {plan_id} is {plan['status']}; only applied or partially applied plans can be undone."
+                f"Plan {plan_id} is {preview['status']}; only applied, partially applied, or partially undone plans can be undone."
             )
-        if confirmation != plan["undo_confirmation"]:
+        if confirmation != preview["undo_confirmation"]:
             raise ValueError("Undo confirmation string does not match plan preview.")
         if any(
             step.get("type") == "delete_file" and step.get("status") == "applied"
-            for step in plan["steps"]
+            for step in preview["steps"]
         ):
             raise ValueError(
                 "This plan contains a permanent delete and cannot be undone."
             )
+        plan = self.audit.claim_plan(
+            plan_id,
+            expected_statuses=undoable_statuses,
+            claimed_status="undoing",
+        )
 
-        undone = 0
+        undone = sum(step.get("undo_status") == "undone" for step in plan["steps"])
         try:
             for step in reversed(plan["steps"]):
-                if step.get("status") != "applied":
+                if step.get("status") != "applied" or step.get("undo_status"):
                     continue
                 drive = self._drive()
                 kind = step["type"]
@@ -1052,7 +1061,9 @@ class DriveOpsPlanner:
                         step["file_id"], step["source_parent_id"], target_id
                     )
                 elif kind == "create_folder":
-                    if not step.get("generic_action") or not step.get("created_new"):
+                    if not step.get("created_new"):
+                        step["undo_status"] = "not_needed"
+                        self.audit.update_plan(plan, status="undoing")
                         continue
                     subject_id = step.get("created_folder_id")
                     after = drive.set_trashed(subject_id, True)
@@ -1099,6 +1110,7 @@ class DriveOpsPlanner:
                     after=after,
                     message=f"Undid {kind}.",
                 )
+                self.audit.update_plan(plan, status="undoing")
         except Exception as exc:
             self.audit.append_event(
                 action="undo_plan",
@@ -1107,8 +1119,14 @@ class DriveOpsPlanner:
                 subject_id=plan["folder"]["id"],
                 message=str(exc),
             )
+            self.audit.update_plan(
+                plan,
+                status="partially_undone" if undone else preview["status"],
+                error=str(exc),
+            )
             raise
 
+        plan.pop("error", None)
         self.audit.update_plan(plan, status="undone")
         self.audit.append_event(
             action="undo_plan",

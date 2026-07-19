@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -80,6 +82,11 @@ class FakeDrive:
             parents.append(add_parent)
         file["parents"] = parents
         return dict(file)
+
+    def set_trashed(self, file_id: str, trashed: bool) -> dict:
+        collection = self.files if file_id in self.files else self.folders
+        collection[file_id]["trashed"] = trashed
+        return dict(collection[file_id])
 
 
 class ActionFakeDrive(FakeDrive):
@@ -285,6 +292,54 @@ def test_undo_restores_file_parents(
     assert result["status"] == "undone"
     assert drive.files["f1"]["parents"] == ["folder_root"]
     assert drive.files["f2"]["parents"] == ["folder_root"]
+    assert all(folder["trashed"] is True for folder in drive.folders.values())
+
+
+def test_concurrent_apply_claims_plan_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+
+    class SlowDrive(ActionFakeDrive):
+        def __init__(self) -> None:
+            super().__init__()
+            self.create_calls = 0
+            self.lock = threading.Lock()
+
+        def create_folder(self, name: str, parent_id: str) -> dict:
+            with self.lock:
+                self.create_calls += 1
+            time.sleep(0.1)
+            return super().create_folder(name, parent_id)
+
+    drive = SlowDrive()
+    audit = store(tmp_path)
+    planner = DriveOpsPlanner(drive, audit)
+    plan = planner.plan_file_actions(
+        actions=[{"type": "create_folder", "name": "Reports"}]
+    )
+    start = threading.Barrier(2)
+    results: list[str] = []
+
+    def apply() -> None:
+        start.wait()
+        try:
+            DriveOpsPlanner(drive, store(tmp_path)).apply_plan(
+                plan_id=plan["plan_id"], confirmation=plan["confirmation"]
+            )
+            results.append("applied")
+        except ValueError:
+            results.append("rejected")
+
+    threads = [threading.Thread(target=apply) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(results) == ["applied", "rejected"]
+    assert drive.create_calls == 1
+    assert audit.get_plan(plan["plan_id"])["status"] == "applied"
 
 
 def test_latest_plan_shortcuts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -469,6 +524,54 @@ def test_partially_applied_plan_can_be_undone(
     assert drive.files["f1"]["name"] == "first.pdf"
 
     planner.undo_plan(plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"])
+    assert drive.files["f1"]["name"] == "alpha-report.pdf"
+
+
+def test_partial_undo_is_persisted_and_retry_skips_completed_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[
+            {"type": "rename_file", "file_id_or_name": "f1", "new_name": "first.pdf"},
+            {"type": "rename_file", "file_id_or_name": "f2", "new_name": "second.txt"},
+        ]
+    )
+    planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+
+    rename_file = drive.rename_file
+
+    def fail_first_file(file_id: str, new_name: str) -> dict:
+        if file_id == "f1":
+            raise RuntimeError("simulated undo failure")
+        return rename_file(file_id, new_name)
+
+    drive.rename_file = fail_first_file  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="simulated undo failure"):
+        planner.undo_plan(
+            plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+        )
+
+    partial = planner.audit.get_plan(plan["plan_id"])
+    assert partial["status"] == "partially_undone"
+    assert partial["steps"][1]["undo_status"] == "undone"
+    assert drive.files["f2"]["name"] == "beta-notes.txt"
+
+    retried_files: list[str] = []
+
+    def track_retry(file_id: str, new_name: str) -> dict:
+        retried_files.append(file_id)
+        return rename_file(file_id, new_name)
+
+    drive.rename_file = track_retry  # type: ignore[method-assign]
+    result = planner.undo_plan(
+        plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+    )
+
+    assert result["status"] == "undone"
+    assert retried_files == ["f1"]
     assert drive.files["f1"]["name"] == "alpha-report.pdf"
 
 

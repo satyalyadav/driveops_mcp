@@ -300,7 +300,7 @@ def build_server() -> MCPServer:
 
     @mcp.tool(
         name="driveops.undo_plan",
-        description="Undo file moves from an applied DriveOps plan. Omit plan_id to undo the latest applied plan. Requires write profile and exact undo confirmation.",
+        description="Undo reversible actions from an applied DriveOps plan. Omit plan_id to undo the latest applied plan. Requires write profile and exact undo confirmation; interrupted undos can be retried safely.",
         structured_output=True,
     )
     def undo_plan(confirmation: str, plan_id: str | None = None) -> dict[str, Any]:
