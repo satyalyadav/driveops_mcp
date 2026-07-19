@@ -10,7 +10,7 @@ from typing import Any
 
 from .audit import AuditStore
 from .auth import require_write_profile
-from .google_drive import GoogleDriveClient
+from .backend import DriveBackend
 from .schemas import (
     GOOGLE_FOLDER_MIME,
     OrganizationStrategy,
@@ -119,13 +119,11 @@ def _compact_file(item: dict[str, Any]) -> dict[str, Any]:
 
 
 class DriveOpsPlanner:
-    def __init__(
-        self, drive: GoogleDriveClient | None, audit_store: AuditStore
-    ) -> None:
+    def __init__(self, drive: DriveBackend | None, audit_store: AuditStore) -> None:
         self.drive = drive
         self.audit = audit_store
 
-    def _drive(self) -> GoogleDriveClient:
+    def _drive(self) -> DriveBackend:
         if self.drive is None:
             raise RuntimeError("Google Drive client is required for this operation.")
         return self.drive

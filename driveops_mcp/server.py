@@ -10,6 +10,7 @@ from mcp.server import MCPServer
 
 from . import __version__
 from .audit import AuditStore
+from .backend import DriveBackend
 from .auth import (
     auth_status,
     get_credentials,
@@ -23,13 +24,13 @@ from .schemas import DriveFileAction, OrganizationStrategy
 
 INSTRUCTIONS = """DriveOps MCP is a safe, general Google Drive operations layer. Use read, download, extraction, permission-listing, shared-drive, and change-feed tools freely. For every write, use driveops.plan_file_actions or an organization planner, preview it, explain the proposed changes and any irreversible actions, and only then call apply with the confirmation string from the preview. Never invent confirmation strings. Undo uses the undo confirmation from preview. Prefer trash over permanent delete, use small batches, and ask the user before broad Drive changes or sharing content."""
 
-_drive_factory: Callable[[], GoogleDriveClient] = GoogleDriveClient
+_drive_factory: Callable[[], DriveBackend] = GoogleDriveClient
 _store_factory: Callable[[], AuditStore] = AuditStore
 
 
 def set_factories(
     *,
-    drive_factory: Callable[[], GoogleDriveClient] | None = None,
+    drive_factory: Callable[[], DriveBackend] | None = None,
     store_factory: Callable[[], AuditStore] | None = None,
 ) -> None:
     """Override factories for tests."""
@@ -41,7 +42,7 @@ def set_factories(
         _store_factory = store_factory
 
 
-def _drive() -> GoogleDriveClient:
+def _drive() -> DriveBackend:
     return _drive_factory()
 
 
