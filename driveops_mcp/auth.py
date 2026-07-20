@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -86,6 +87,32 @@ def token_path() -> Path:
     ).expanduser()
 
 
+def token_json() -> str | None:
+    """Return a hosted secret-injected Google token without writing it to disk."""
+
+    return os.environ.get("DRIVEOPS_GOOGLE_TOKEN_JSON")
+
+
+def credentials_configured() -> bool:
+    return bool(token_json()) or token_path().is_file()
+
+
+def credentials_ready(profile: ScopeProfile | None = None) -> bool:
+    return bool(auth_status(profile)["credentials_ready"])
+
+
+def _credentials_from_json(content: str, scopes: list[str]) -> Credentials:
+    try:
+        info = json.loads(content)
+        if not isinstance(info, dict):
+            raise ValueError
+        return Credentials.from_authorized_user_info(info, scopes)
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            "DRIVEOPS_GOOGLE_TOKEN_JSON is not a valid authorized-user token."
+        ) from exc
+
+
 def _secure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
@@ -163,24 +190,40 @@ def auth_status(profile: ScopeProfile | None = None) -> dict[str, object]:
     secret = client_secret_path()
     token_valid = False
     has_required_scopes = False
-    if token.exists():
+    token_refreshable = False
+    creds: Credentials | None = None
+    injected_token = token_json()
+    if injected_token:
+        try:
+            creds = _credentials_from_json(injected_token, scopes_for_profile(profile))
+            token_valid = creds.valid
+            has_required_scopes = creds.has_scopes(scopes_for_profile(profile))
+        except (KeyError, TypeError, ValueError):
+            token_valid = False
+            has_required_scopes = False
+    elif token.exists():
         try:
             creds = Credentials.from_authorized_user_file(
                 str(token), scopes_for_profile(profile)
             )
             token_valid = creds.valid
             has_required_scopes = creds.has_scopes(scopes_for_profile(profile))
-        except ValueError:
+        except (KeyError, TypeError, ValueError):
             token_valid = False
             has_required_scopes = False
+    if creds is not None:
+        token_refreshable = bool(creds.expired and creds.refresh_token)
     return {
         "profile": profile,
         "client_secret_path": str(secret),
         "client_secret_present": secret.exists(),
         "token_path": str(token),
-        "token_present": token.exists(),
+        "token_present": bool(injected_token) or token.exists(),
+        "token_source": "environment" if injected_token else "file",
         "token_valid": token_valid,
+        "token_refreshable": token_refreshable,
         "has_required_scopes": has_required_scopes,
+        "credentials_ready": has_required_scopes and (token_valid or token_refreshable),
         "scopes": scopes_for_profile(profile),
     }
 
@@ -228,13 +271,26 @@ def get_credentials(
     scopes = scopes_for_profile(profile)
     token = token_path()
     secret = client_secret_path()
-    _secure_directory(token.parent)
-    if token.exists() and os.name != "nt":
-        token.chmod(0o600)
+    injected_token = token_json()
+    if not injected_token:
+        _secure_directory(token.parent)
+        if token.exists() and os.name != "nt":
+            token.chmod(0o600)
 
     creds: Credentials | None = None
     if force_reauth:
+        if injected_token:
+            raise ValueError(
+                "Cannot force reauthentication while DRIVEOPS_GOOGLE_TOKEN_JSON is set."
+            )
         token.unlink(missing_ok=True)
+    elif injected_token:
+        creds = _credentials_from_json(injected_token, scopes)
+        if not creds.has_scopes(scopes):
+            raise PermissionError(
+                "DRIVEOPS_GOOGLE_TOKEN_JSON does not contain the scopes required by "
+                f"the {profile or scope_profile()} profile."
+            )
     elif token.exists():
         creds = Credentials.from_authorized_user_file(str(token), scopes)
         if not creds.has_scopes(scopes):
@@ -246,11 +302,22 @@ def get_credentials(
     if creds and creds.expired and creds.refresh_token:
         try:
             _refresh_expired_credentials(creds, Request())
-            _write_private_text(token, creds.to_json())
+            if not injected_token:
+                _write_private_text(token, creds.to_json())
             return creds
         except RefreshError:
+            if injected_token:
+                raise PermissionError(
+                    "The injected Google OAuth refresh token was rejected. Rotate "
+                    "DRIVEOPS_GOOGLE_TOKEN_JSON before restarting the service."
+                )
             token.unlink(missing_ok=True)
             creds = None
+
+    if injected_token:
+        raise PermissionError(
+            "DRIVEOPS_GOOGLE_TOKEN_JSON is expired and cannot be refreshed. Rotate the hosted secret."
+        )
 
     if not secret.exists():
         raise FileNotFoundError(

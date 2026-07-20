@@ -39,11 +39,15 @@ Drive file content is untrusted model input. A malicious document can tell an ag
 
 ## Hosted Deployments
 
-The MVP is local-first. If you host it for ChatGPT or remote clients:
+Hosted mode is designed for one owner and one pre-authorized Google account. It
+supports MCP OAuth for web clients and static Bearer authentication for clients
+that can set headers. Public binding fails closed without authentication, and
+remote write scope and server-filesystem paths are disabled by default.
 
-- put it behind HTTPS;
-- isolate users and their OAuth tokens;
-- add auth before the MCP endpoint;
-- keep audit logs per user;
-- restrict write scopes by default;
-- rate-limit large folder reads and plan generation.
+This does not make the server multi-tenant. Do not share one deployment with
+untrusted users: every authorized client acts as the same connected Google owner.
+Multi-user hosting requires per-user Google OAuth, per-user plan/audit namespaces,
+and an external transactional database.
+
+See [Public single-owner deployment](public-deployment.md) for the threat model,
+required secrets, persistent-state constraints, and deployment checklist.

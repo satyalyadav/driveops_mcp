@@ -18,8 +18,9 @@ class GoogleDriveClient(GoogleFilesMixin, GoogleAccessMixin):
     ) -> None:
         if drive_service is None:
             creds = get_credentials()
-            drive_service = build("drive", "v3", credentials=creds)
-            sheets_service = build("sheets", "v4", credentials=creds)
+            drive_service = build(
+                "drive", "v3", credentials=creds, cache_discovery=False
+            )
         self.drive = drive_service
         self.sheets = sheets_service
 

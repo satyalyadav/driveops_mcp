@@ -1,6 +1,6 @@
 [project]
 name = "driveops-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Open-source MCP-native Google Drive operations layer with plans, approvals, undo, and audit logs."
 readme = "README.md"
 requires-python = ">=3.10"

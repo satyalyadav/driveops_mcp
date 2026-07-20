@@ -3,22 +3,47 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import os
+import threading
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.settings import (
+    AuthSettings,
+    ClientRegistrationOptions,
+    RevocationOptions,
+)
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.responses import JSONResponse
 
 from . import __version__
 from .audit import AuditStore
 from .backend import DriveBackend
 from .auth import (
     auth_status,
+    credentials_configured,
+    credentials_ready,
     get_credentials,
     logout,
     profile_from_name,
     require_write_profile,
+    scope_profile,
 )
 from .google_drive import GoogleDriveClient
+from .http_security import (
+    StaticTokenVerifier,
+    add_http_security_middleware,
+    secret_is_strong,
+)
+from .oauth import (
+    OAUTH_SCOPES,
+    SingleOwnerOAuthProvider,
+    register_owner_authorization_routes,
+)
 from .planner import DriveOpsPlanner
 from .schemas import DriveFileAction, OrganizationStrategy
 
@@ -26,6 +51,17 @@ INSTRUCTIONS = """DriveOps MCP is a safe, general Google Drive operations layer.
 
 _drive_factory: Callable[[], DriveBackend] = GoogleDriveClient
 _store_factory: Callable[[], AuditStore] = AuditStore
+_drive_factory_generation = 0
+
+
+class _DriveThreadState(threading.local):
+    """Reuse clients without sharing googleapiclient's transport across threads."""
+
+    client: DriveBackend | None = None
+    generation: int = -1
+
+
+_drive_thread_state = _DriveThreadState()
 
 
 def set_factories(
@@ -35,33 +71,80 @@ def set_factories(
 ) -> None:
     """Override factories for tests."""
 
-    global _drive_factory, _store_factory
+    global _drive_factory, _drive_factory_generation, _store_factory
     if drive_factory is not None:
         _drive_factory = drive_factory
+        _drive_factory_generation += 1
     if store_factory is not None:
         _store_factory = store_factory
 
 
 def _drive() -> DriveBackend:
-    return _drive_factory()
+    if (
+        _drive_thread_state.client is None
+        or _drive_thread_state.generation != _drive_factory_generation
+    ):
+        _drive_thread_state.client = _drive_factory()
+        _drive_thread_state.generation = _drive_factory_generation
+    return _drive_thread_state.client
 
 
 def _planner() -> DriveOpsPlanner:
-    return DriveOpsPlanner(_drive_factory(), _store_factory())
+    return DriveOpsPlanner(_drive(), _store_factory())
 
 
 def _local_planner() -> DriveOpsPlanner:
     return DriveOpsPlanner(None, _store_factory())
 
 
-def build_server() -> MCPServer:
+def build_server(
+    *,
+    auth: AuthSettings | None = None,
+    token_verifier: TokenVerifier | None = None,
+    oauth_provider: SingleOwnerOAuthProvider | None = None,
+    allow_local_file_access: bool = True,
+    http_auth_mode: str = "none",
+    include_health_routes: bool = False,
+) -> MCPServer:
     mcp = MCPServer(
         name="driveops-mcp",
         title="DriveOps MCP",
         description="Open-source safe Google Drive operations with plans, approvals, undo, and audit logs.",
         instructions=INSTRUCTIONS,
         version=__version__,
+        auth_server_provider=oauth_provider,
+        token_verifier=token_verifier,
+        auth=auth,
     )
+
+    if oauth_provider is not None:
+        register_owner_authorization_routes(mcp, oauth_provider)
+
+    if include_health_routes:
+
+        @mcp.custom_route("/healthz", methods=["GET"])
+        async def healthz(request: Any) -> JSONResponse:
+            del request
+            return JSONResponse(
+                {"status": "ok", "service": "driveops-mcp", "version": __version__},
+                headers={"Cache-Control": "no-store"},
+            )
+
+        @mcp.custom_route("/readyz", methods=["GET"])
+        async def readyz(request: Any) -> JSONResponse:
+            del request
+            configured = credentials_configured()
+            ready = credentials_ready()
+            return JSONResponse(
+                {
+                    "status": "ready" if ready else "not_ready",
+                    "auth_mode": http_auth_mode,
+                    "google_credentials_configured": configured,
+                    "google_credentials_ready": ready,
+                },
+                status_code=200 if ready else 503,
+                headers={"Cache-Control": "no-store"},
+            )
 
     @mcp.tool(
         name="drive.search_files",
@@ -132,6 +215,10 @@ def build_server() -> MCPServer:
         max_bytes: int = 25_000_000,
         overwrite: bool = False,
     ) -> dict[str, Any]:
+        if output_path and not allow_local_file_access:
+            raise PermissionError(
+                "Writing downloads to the MCP server filesystem is disabled for remote HTTP."
+            )
         return _drive().download_file(
             file_id_or_name,
             export_format=export_format,
@@ -152,6 +239,10 @@ def build_server() -> MCPServer:
         max_text_chars: int = 500_000,
         overwrite: bool = False,
     ) -> dict[str, Any]:
+        if output_dir and not allow_local_file_access:
+            raise PermissionError(
+                "Extracting files on the MCP server filesystem is disabled for remote HTTP."
+            )
         return _drive().extract_file(
             file_id_or_name,
             output_dir=output_dir,
@@ -222,6 +313,11 @@ def build_server() -> MCPServer:
     def plan_file_actions(
         actions: list[DriveFileAction], dry_run: bool = True
     ) -> dict[str, Any]:
+        if not allow_local_file_access and any(action.local_path for action in actions):
+            raise PermissionError(
+                "Reading upload content from the MCP server filesystem is disabled for remote HTTP. "
+                "Use create_file with text or content_base64 instead."
+            )
         normalized = [action.model_dump() for action in actions]
         return _planner().plan_file_actions(actions=normalized, dry_run=dry_run)
 
@@ -345,14 +441,195 @@ def run_stdio() -> None:
     build_server().run("stdio")
 
 
-def run_http(host: str = "127.0.0.1", port: int = 8787) -> None:
-    build_server().run(
-        "streamable-http",
-        host=host,
-        port=port,
+def _env_list(name: str) -> list[str]:
+    return [
+        item.strip() for item in os.environ.get(name, "").split(",") if item.strip()
+    ]
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _public_base_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.rstrip("/")
+    parsed = urlsplit(value)
+    if (
+        not parsed.scheme
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "DRIVEOPS_PUBLIC_URL must be an origin such as https://mcp.example.com."
+        )
+    public_host_is_loopback = _is_loopback_host(parsed.hostname)
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and public_host_is_loopback
+    ):
+        raise ValueError("Public MCP deployments require an HTTPS DRIVEOPS_PUBLIC_URL.")
+    return value
+
+
+def create_http_app(
+    *,
+    host: str = "127.0.0.1",
+    auth_mode: str | None = None,
+    public_url: str | None = None,
+    allow_insecure_no_auth: bool = False,
+    allow_local_file_access: bool | None = None,
+) -> Any:
+    """Build the secured ASGI app used by hosted/tunneled HTTP deployments."""
+
+    loopback = _is_loopback_host(host)
+    auth_mode = (auth_mode or os.environ.get("DRIVEOPS_MCP_AUTH_MODE", "none")).lower()
+    if auth_mode not in {"none", "token", "oauth"}:
+        raise ValueError("DRIVEOPS_MCP_AUTH_MODE must be one of: none, token, oauth.")
+    public_url = _public_base_url(public_url or os.environ.get("DRIVEOPS_PUBLIC_URL"))
+    public_exposure = bool(public_url) or not loopback
+    if public_exposure and auth_mode == "none" and not allow_insecure_no_auth:
+        raise ValueError(
+            "Refusing to expose unauthenticated MCP HTTP. Configure token or oauth auth, "
+            "or use --unsafe-no-auth only for an isolated temporary test."
+        )
+    if auth_mode != "none" and not public_url:
+        raise ValueError("Authenticated HTTP requires DRIVEOPS_PUBLIC_URL.")
+    if public_exposure and not credentials_ready():
+        raise ValueError(
+            "Public HTTP requires valid or refreshable Google credentials with the selected "
+            "scope profile. Set DRIVEOPS_GOOGLE_TOKEN_JSON or mount DRIVEOPS_GOOGLE_TOKEN."
+        )
+    if (
+        public_exposure
+        and scope_profile() == "write"
+        and os.environ.get("DRIVEOPS_ALLOW_REMOTE_WRITE") != "1"
+    ):
+        raise ValueError(
+            "Remote write scope is disabled. Set DRIVEOPS_ALLOW_REMOTE_WRITE=1 only after "
+            "reviewing the hosted deployment's authentication and audit storage."
+        )
+
+    verifier: TokenVerifier | None = None
+    provider: SingleOwnerOAuthProvider | None = None
+    auth_settings: AuthSettings | None = None
+    if auth_mode == "token":
+        token = os.environ.get("DRIVEOPS_MCP_AUTH_TOKEN")
+        if not secret_is_strong(token):
+            raise ValueError("DRIVEOPS_MCP_AUTH_TOKEN must be at least 32 bytes.")
+        verifier = StaticTokenVerifier(str(token))
+        auth_settings = AuthSettings(
+            issuer_url=public_url,
+            resource_server_url=None,
+            required_scopes=["driveops"],
+        )
+    elif auth_mode == "oauth":
+        access_key = os.environ.get("DRIVEOPS_OAUTH_ACCESS_KEY")
+        redirect_uris = set(_env_list("DRIVEOPS_OAUTH_ALLOWED_REDIRECT_URIS"))
+        provider = SingleOwnerOAuthProvider(
+            issuer_url=str(public_url),
+            access_key=str(access_key or ""),
+            allowed_redirect_uris=redirect_uris,
+        )
+        auth_settings = AuthSettings(
+            issuer_url=public_url,
+            resource_server_url=f"{public_url}/mcp",
+            required_scopes=OAUTH_SCOPES,
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True,
+                valid_scopes=OAUTH_SCOPES,
+                default_scopes=OAUTH_SCOPES,
+            ),
+            revocation_options=RevocationOptions(enabled=True),
+        )
+
+    if allow_local_file_access is None:
+        allow_local_file_access = not public_exposure
+    mcp = build_server(
+        auth=auth_settings,
+        token_verifier=verifier,
+        oauth_provider=provider,
+        allow_local_file_access=allow_local_file_access,
+        http_auth_mode=auth_mode,
+        include_health_routes=True,
+    )
+
+    if public_url:
+        parsed = urlsplit(public_url)
+        allowed_hosts = [parsed.netloc.lower()]
+        allowed_origins = [_origin for _origin in [public_url] if _origin]
+    else:
+        allowed_hosts = [
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "localhost",
+            "localhost:*",
+            "[::1]",
+            "[::1]:*",
+        ]
+        allowed_origins = [
+            "http://127.0.0.1",
+            "http://127.0.0.1:*",
+            "http://localhost",
+            "http://localhost:*",
+            "http://[::1]",
+            "http://[::1]:*",
+        ]
+    allowed_hosts.extend(_env_list("DRIVEOPS_ALLOWED_HOSTS"))
+    allowed_origins.extend(_env_list("DRIVEOPS_ALLOWED_ORIGINS"))
+    transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=list(dict.fromkeys(allowed_hosts)),
+        allowed_origins=list(dict.fromkeys(allowed_origins)),
+    )
+    json_response_default = "1" if public_exposure else "0"
+    json_response = (
+        os.environ.get("DRIVEOPS_HTTP_JSON_RESPONSE", json_response_default) == "1"
+    )
+    app = mcp.streamable_http_app(
         streamable_http_path="/mcp",
         stateless_http=True,
+        json_response=json_response,
+        transport_security=transport_security,
+        host=host,
     )
+    return add_http_security_middleware(
+        app,
+        https=bool(public_url and urlsplit(public_url).scheme == "https"),
+        max_request_bytes=int(os.environ.get("DRIVEOPS_MAX_REQUEST_BYTES", "2000000")),
+        rate_limit_requests=int(os.environ.get("DRIVEOPS_RATE_LIMIT_REQUESTS", "120")),
+    )
+
+
+def run_http(
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    *,
+    auth_mode: str | None = None,
+    public_url: str | None = None,
+    allow_insecure_no_auth: bool = False,
+    allow_local_file_access: bool | None = None,
+) -> None:
+    import uvicorn
+
+    app = create_http_app(
+        host=host,
+        auth_mode=auth_mode,
+        public_url=public_url,
+        allow_insecure_no_auth=allow_insecure_no_auth,
+        allow_local_file_access=allow_local_file_access,
+    )
+    uvicorn.run(app, host=host, port=port, log_level="info", proxy_headers=False)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -361,7 +638,20 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("stdio", help="Run the MCP server over stdio.")
     http = sub.add_parser("http", help="Run the MCP server over Streamable HTTP.")
     http.add_argument("--host", default="127.0.0.1")
-    http.add_argument("--port", type=int, default=8787)
+    http.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8787")))
+    http.add_argument("--auth-mode", choices=["none", "token", "oauth"])
+    http.add_argument("--public-url")
+    http.add_argument(
+        "--unsafe-no-auth",
+        action="store_true",
+        help="Allow an unauthenticated non-loopback/public HTTP listener (unsafe).",
+    )
+    http.add_argument(
+        "--allow-local-file-access",
+        action="store_true",
+        default=None,
+        help="Allow remote tools to read/write paths on the MCP host.",
+    )
     auth = sub.add_parser("auth", help="Manage local Google OAuth for DriveOps.")
     auth_sub = auth.add_subparsers(dest="auth_command")
     auth_status_parser = auth_sub.add_parser("status", help="Show local auth status.")
@@ -385,7 +675,14 @@ def main(argv: list[str] | None = None) -> None:
             return
     elif args.command == "http":
         try:
-            run_http(host=args.host, port=args.port)
+            run_http(
+                host=args.host,
+                port=args.port,
+                auth_mode=args.auth_mode,
+                public_url=args.public_url,
+                allow_insecure_no_auth=args.unsafe_no_auth,
+                allow_local_file_access=args.allow_local_file_access,
+            )
         except KeyboardInterrupt:
             return
     elif args.command == "auth":

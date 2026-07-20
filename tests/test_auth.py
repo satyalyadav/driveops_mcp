@@ -9,6 +9,30 @@ import pytest
 from driveops_mcp import auth
 
 
+def test_get_credentials_supports_injected_hosted_token(monkeypatch) -> None:
+    injected = '{"token":"access","refresh_token":"refresh","client_id":"id","client_secret":"secret"}'
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN_JSON", injected)
+
+    class FakeCredentials:
+        valid = True
+        expired = False
+        refresh_token = "refresh"
+
+        @classmethod
+        def from_authorized_user_info(cls, info, scopes):
+            assert info["refresh_token"] == "refresh"
+            assert scopes == auth.READONLY_SCOPES
+            return cls()
+
+        def has_scopes(self, scopes):
+            return scopes == auth.READONLY_SCOPES
+
+    monkeypatch.setattr(auth, "Credentials", FakeCredentials)
+
+    assert isinstance(auth.get_credentials(), FakeCredentials)
+    assert auth.credentials_configured()
+
+
 def test_get_credentials_uses_google_lowercase_include_granted_scopes(
     monkeypatch,
     tmp_path: Path,

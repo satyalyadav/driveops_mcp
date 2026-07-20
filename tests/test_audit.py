@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 import stat
 
+from mcp.server.auth.middleware.auth_context import auth_context_var
+from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from mcp.server.auth.provider import AccessToken
+
 from driveops_mcp.audit import AuditStore
 
 
@@ -31,3 +35,24 @@ def test_audit_store_round_trips_plan_and_events(tmp_path):
     assert events[0]["action"] == "plan_created"
     if os.name != "nt":
         assert stat.S_IMODE(store.db_path.stat().st_mode) == 0o600
+
+
+def test_audit_event_records_authenticated_client(tmp_path):
+    store = AuditStore(tmp_path / "driveops.db")
+    user = AuthenticatedUser(
+        AccessToken(
+            token="test-token",
+            client_id="client-123",
+            scopes=["driveops"],
+            subject="owner",
+        )
+    )
+    context_token = auth_context_var.set(user)
+    try:
+        store.append_event(action="test", status="ok")
+    finally:
+        auth_context_var.reset(context_token)
+
+    event = store.list_events()[0]
+    assert event["actor_client_id"] == "client-123"
+    assert event["actor_subject"] == "owner"

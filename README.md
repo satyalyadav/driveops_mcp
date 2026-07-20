@@ -98,6 +98,13 @@ driveops-mcp http --host 127.0.0.1 --port 8787
 
 The HTTP endpoint is `/mcp`.
 
+Internet-facing HTTP fails closed unless `token` or `oauth` authentication is
+configured. Hosted mode includes OAuth discovery and approval for web MCP
+clients, strict Host/Origin checks, request and rate limits, security headers,
+health endpoints, and remote-filesystem blocking. Start with
+[Public single-owner deployment](docs/public-deployment.md); do not expose the
+local unauthenticated command directly.
+
 ## Public Tools
 
 Read/search:

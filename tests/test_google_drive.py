@@ -7,11 +7,38 @@ import zipfile
 import pytest
 
 from driveops_mcp import content
+from driveops_mcp import google_drive
 from driveops_mcp.google_drive import (
     AmbiguousFolderError,
     DriveOpsError,
     GoogleDriveClient,
 )
+
+
+def test_google_client_builds_only_drive_without_discovery_cache(monkeypatch) -> None:
+    credentials = object()
+    drive_service = object()
+    calls = []
+
+    monkeypatch.setattr(google_drive, "get_credentials", lambda: credentials)
+
+    def build(service, version, **kwargs):
+        calls.append((service, version, kwargs))
+        return drive_service
+
+    monkeypatch.setattr(google_drive, "build", build)
+
+    client = GoogleDriveClient()
+
+    assert client.drive is drive_service
+    assert client.sheets is None
+    assert calls == [
+        (
+            "drive",
+            "v3",
+            {"credentials": credentials, "cache_discovery": False},
+        )
+    ]
 
 
 def test_binary_read_returns_download_hint() -> None:

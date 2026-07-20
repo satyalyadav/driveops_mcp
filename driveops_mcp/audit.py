@@ -9,6 +9,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from mcp.server.auth.middleware.auth_context import get_access_token
+
 from .auth import state_dir
 from .schemas import now_iso
 
@@ -61,10 +63,20 @@ class AuditStore:
                     before_json text,
                     after_json text,
                     message text,
+                    actor_client_id text,
+                    actor_subject text,
                     created_at text not null
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("pragma table_info(audit_events)").fetchall()
+            }
+            if "actor_client_id" not in columns:
+                conn.execute("alter table audit_events add column actor_client_id text")
+            if "actor_subject" not in columns:
+                conn.execute("alter table audit_events add column actor_subject text")
 
     def save_plan(self, plan: dict[str, Any]) -> None:
         ts = now_iso()
@@ -203,6 +215,7 @@ class AuditStore:
         after: Any = None,
         message: str | None = None,
     ) -> dict[str, Any]:
+        access_token = get_access_token()
         event = {
             "id": str(uuid.uuid4()),
             "plan_id": plan_id,
@@ -212,6 +225,8 @@ class AuditStore:
             "before": before,
             "after": after,
             "message": message,
+            "actor_client_id": access_token.client_id if access_token else None,
+            "actor_subject": access_token.subject if access_token else None,
             "created_at": now_iso(),
         }
         with self._connect() as conn:
@@ -219,8 +234,8 @@ class AuditStore:
                 """
                 insert into audit_events (
                     id, plan_id, action, status, subject_id, before_json,
-                    after_json, message, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    after_json, message, actor_client_id, actor_subject, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["id"],
@@ -231,6 +246,8 @@ class AuditStore:
                     json.dumps(before, sort_keys=True) if before is not None else None,
                     json.dumps(after, sort_keys=True) if after is not None else None,
                     message,
+                    event["actor_client_id"],
+                    event["actor_subject"],
                     event["created_at"],
                 ),
             )
@@ -265,6 +282,8 @@ class AuditStore:
                     if row["after_json"]
                     else None,
                     "message": row["message"],
+                    "actor_client_id": row["actor_client_id"],
+                    "actor_subject": row["actor_subject"],
                     "created_at": row["created_at"],
                 }
             )

@@ -116,4 +116,13 @@ or an HTTP server:
 
 ## ChatGPT Custom MCP Apps
 
-ChatGPT web custom MCP apps need a publicly reachable HTTPS Streamable HTTP server. For MVP use, run DriveOps locally and expose it through a trusted tunnel only for your own testing, or deploy it behind HTTPS. Do not expose the server publicly without proper OAuth, user isolation, and rate limiting.
+ChatGPT web custom MCP apps need a reachable HTTPS Streamable HTTP server or a
+supported private tunnel. For a public single-owner deployment, use DriveOps
+`oauth` mode and add ChatGPT's exact published OAuth callback URL to
+`DRIVEOPS_OAUTH_ALLOWED_REDIRECT_URIS`. Connect the app to
+`https://your-host.example/mcp`; OAuth discovery and dynamic registration are
+served automatically.
+
+The hosted process uses the server owner's pre-authorized Google account. It is
+not safe to offer the same deployment to unrelated users. See
+[Public single-owner deployment](public-deployment.md).
