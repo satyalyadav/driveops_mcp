@@ -1,5 +1,7 @@
 # DriveOps MCP
 
+> Originally ported to Python from [isaacphi/mcp-gdrive](https://github.com/isaacphi/mcp-gdrive).
+
 > [!IMPORTANT]
 > **Project status:** DriveOps MCP is no longer under active development. It remains available as an open-source reference and portfolio project, but new features, support, and security updates are not planned.
 
