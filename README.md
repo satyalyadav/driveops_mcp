@@ -1,5 +1,8 @@
 # DriveOps MCP
 
+> [!IMPORTANT]
+> **Project status:** DriveOps MCP is no longer under active development. It remains available as an open-source reference and portfolio project, but new features, support, and security updates are not planned.
+
 DriveOps MCP is a free, open-source, model-agnostic Google Drive toolkit for AI agents. It lets MCP-compatible assistants search, read, organize, and safely modify Drive files.
 
 Writes are planned, previewed, confirmed, audited, and reversible when possible.
@@ -91,5 +94,9 @@ Create a plan to organize my "Screenshots" folder by modified month. Show me the
 ```text
 Preview the latest plan, explain it, and apply it only after I approve it.
 ```
+
+## Alternatives
+
+For a broader, actively maintained integration covering Drive, Docs, Sheets, Slides, and Calendar, see [Google Drive MCP Server](https://github.com/piotr-agier/google-drive-mcp).
 
 See [`docs/`](docs/) for security, client configuration, hosting, and protocol details.
