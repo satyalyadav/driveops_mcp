@@ -7,6 +7,112 @@ from pathlib import Path
 import pytest
 
 from driveops_mcp import auth
+from driveops_mcp import server
+
+
+def test_profile_from_name_uses_effective_environment_profile(monkeypatch) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+
+    assert auth.profile_from_name(None) == "write"
+
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "readonly")
+
+    assert auth.profile_from_name(None) == "readonly"
+
+
+def test_profile_from_name_explicit_value_overrides_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+
+    assert auth.profile_from_name("readonly") == "readonly"
+
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "readonly")
+
+    assert auth.profile_from_name("write") == "write"
+
+
+def test_auth_cli_uses_environment_profile_when_flag_is_omitted(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    calls = []
+
+    def fake_get_credentials(profile, **kwargs):
+        calls.append(("login", profile, kwargs))
+
+    def fake_auth_status(profile):
+        calls.append(("status", profile))
+        return {"profile": profile}
+
+    monkeypatch.setattr(server, "get_credentials", fake_get_credentials)
+    monkeypatch.setattr(server, "auth_status", fake_auth_status)
+
+    server.main(["auth", "login"])
+
+    assert calls == [
+        ("login", "write", {"force_reauth": False, "show_auth_url": True}),
+        ("status", "write"),
+    ]
+    assert '"profile": "write"' in capsys.readouterr().out
+
+
+def test_auth_status_reports_refresh_capability_for_valid_token(
+    monkeypatch, tmp_path: Path
+) -> None:
+    token = tmp_path / "token.json"
+    token.write_text('{"token": "valid"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+
+    class FakeCredentials:
+        valid = True
+        expired = False
+        refresh_token = "refresh-token"
+
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            assert path == str(token)
+            assert scopes == auth.READONLY_SCOPES
+            return cls()
+
+        def has_scopes(self, scopes):
+            return scopes == auth.READONLY_SCOPES
+
+    monkeypatch.setattr(auth, "Credentials", FakeCredentials)
+
+    status = auth.auth_status("readonly")
+
+    assert status["token_valid"] is True
+    assert status["token_expired"] is False
+    assert status["token_refreshable"] is True
+    assert status["credentials_ready"] is True
+
+
+def test_auth_status_reports_expired_refreshable_token_as_ready(
+    monkeypatch, tmp_path: Path
+) -> None:
+    token = tmp_path / "token.json"
+    token.write_text('{"token": "expired"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+
+    class FakeCredentials:
+        valid = False
+        expired = True
+        refresh_token = "refresh-token"
+
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            return cls()
+
+        def has_scopes(self, scopes):
+            return scopes == auth.WRITE_SCOPES
+
+    monkeypatch.setattr(auth, "Credentials", FakeCredentials)
+
+    status = auth.auth_status("write")
+
+    assert status["token_valid"] is False
+    assert status["token_expired"] is True
+    assert status["token_refreshable"] is True
+    assert status["credentials_ready"] is True
 
 
 def test_get_credentials_supports_injected_hosted_token(monkeypatch) -> None:

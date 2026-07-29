@@ -171,6 +171,8 @@ def _browser_name() -> str | None:
 
 
 def profile_from_name(value: str | None) -> ScopeProfile:
+    if value is None:
+        return scope_profile()
     if value and value.strip().lower() in {"write", "full", "rw"}:
         return "write"
     return "readonly"
@@ -189,6 +191,7 @@ def auth_status(profile: ScopeProfile | None = None) -> dict[str, object]:
     token = token_path()
     secret = client_secret_path()
     token_valid = False
+    token_expired = False
     has_required_scopes = False
     token_refreshable = False
     creds: Credentials | None = None
@@ -212,7 +215,8 @@ def auth_status(profile: ScopeProfile | None = None) -> dict[str, object]:
             token_valid = False
             has_required_scopes = False
     if creds is not None:
-        token_refreshable = bool(creds.expired and creds.refresh_token)
+        token_expired = bool(creds.expired)
+        token_refreshable = bool(creds.refresh_token)
     return {
         "profile": profile,
         "client_secret_path": str(secret),
@@ -221,6 +225,7 @@ def auth_status(profile: ScopeProfile | None = None) -> dict[str, object]:
         "token_present": bool(injected_token) or token.exists(),
         "token_source": "environment" if injected_token else "file",
         "token_valid": token_valid,
+        "token_expired": token_expired,
         "token_refreshable": token_refreshable,
         "has_required_scopes": has_required_scopes,
         "credentials_ready": has_required_scopes and (token_valid or token_refreshable),

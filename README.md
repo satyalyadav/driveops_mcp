@@ -37,12 +37,23 @@ DriveOps uses read-only access by default. To enable write tools:
 export DRIVEOPS_SCOPE_PROFILE=write
 ```
 
-Check or start Google authorization:
+Check or start Google authorization. When `--profile` is omitted, both commands
+honor `DRIVEOPS_SCOPE_PROFILE`:
 
 ```bash
 driveops-mcp auth status
 driveops-mcp auth login
 ```
+
+You can also select the profile explicitly:
+
+```bash
+driveops-mcp auth status --profile write
+driveops-mcp auth login --profile write
+```
+
+Changing from read-only to write access requires a new Google consent flow so
+the saved token includes the broader scopes.
 
 ## Run
 

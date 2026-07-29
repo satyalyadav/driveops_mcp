@@ -21,6 +21,29 @@ The desktop app loads MCP servers when a thread starts. After editing config, st
 /home/satyal/gdrive-mcp/.venv/bin/driveops-mcp auth login
 ```
 
+The command above uses the effective `DRIVEOPS_SCOPE_PROFILE` and defaults to
+read-only. For a client configured with `DRIVEOPS_SCOPE_PROFILE=write`, you can
+make the intended consent profile explicit:
+
+```bash
+/home/satyal/gdrive-mcp/.venv/bin/driveops-mcp auth login --profile write
+```
+
+Google OAuth scopes are stored in the token. Switching an existing setup from
+read-only to write access therefore requires completing the write-profile
+consent flow; changing the environment variable alone cannot broaden an
+already-issued token.
+
+### DriveOps credentials vs. host connectors
+
+DriveOps uses the token configured by `DRIVEOPS_GOOGLE_TOKEN` (or its default
+token path). A Google Drive connector built into the MCP host or assistant is a
+separate application with its own OAuth grant. Authorizing DriveOps for writes
+does not broaden that connector's scopes, and reconnecting the host connector
+does not replace the DriveOps token. When diagnosing a permission error, check
+which tool produced it and run `driveops-mcp auth status` against the same
+environment used to start the DriveOps server.
+
 ## Browser Auth by OS
 
 DriveOps opens Google OAuth lazily on the first Drive-accessing tool call. The same code path is used by Codex, Claude Code, Gemini CLI, Cursor, and other local stdio clients.
