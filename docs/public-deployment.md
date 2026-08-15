@@ -36,6 +36,10 @@ the hosting operator's responsibility.
 
 ## Prepare the Google token
 
+First complete the [durable Google OAuth setup](google-oauth-setup.md). In
+particular, do not deploy a refresh token minted while an External Google OAuth
+app remains in Testing; Google will reject it after seven days.
+
 Authenticate locally first, using the default read-only profile:
 
 ```bash

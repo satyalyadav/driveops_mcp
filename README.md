@@ -18,7 +18,14 @@ python3 -m venv .venv
 
 ## Google OAuth Setup
 
-Create a Google OAuth Desktop client with the Drive API enabled. Save the downloaded client secret at:
+Create a Google OAuth Desktop client with the Google Drive API and Google Sheets
+API enabled. For durable credentials, the Google Auth Platform publishing status
+must not remain **External + Testing**: Google expires those refresh tokens after
+seven days. Use **Internal** for one Workspace organization, or change an External
+app's Audience publishing status to **In production**. See the
+[complete OAuth setup](docs/google-oauth-setup.md).
+
+Save the downloaded client secret at:
 
 ```text
 ~/.config/driveops-mcp/client_secret.json
@@ -37,12 +44,13 @@ DriveOps uses read-only access by default. To enable write tools:
 export DRIVEOPS_SCOPE_PROFILE=write
 ```
 
-Check or start Google authorization. When `--profile` is omitted, both commands
+Check or start Google authorization. When `--profile` is omitted, all commands
 honor `DRIVEOPS_SCOPE_PROFILE`:
 
 ```bash
 driveops-mcp auth status
 driveops-mcp auth login
+driveops-mcp auth check
 ```
 
 You can also select the profile explicitly:
@@ -54,6 +62,10 @@ driveops-mcp auth login --profile write
 
 Changing from read-only to write access requires a new Google consent flow so
 the saved token includes the broader scopes.
+
+`auth status` is a local inspection. `auth check` performs a real token refresh
+against Google and exits nonzero if the saved credential is missing, rejected,
+or not refreshable. Run it once after setup and before unattended use.
 
 ## Run
 

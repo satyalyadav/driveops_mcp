@@ -25,6 +25,7 @@ from .audit import AuditStore
 from .backend import DriveBackend
 from .auth import (
     auth_status,
+    check_credentials,
     credentials_configured,
     credentials_ready,
     get_credentials,
@@ -656,6 +657,10 @@ def main(argv: list[str] | None = None) -> None:
     auth_sub = auth.add_subparsers(dest="auth_command")
     auth_status_parser = auth_sub.add_parser("status", help="Show local auth status.")
     auth_status_parser.add_argument("--profile", choices=["readonly", "write"])
+    auth_check_parser = auth_sub.add_parser(
+        "check", help="Verify the saved refresh token with Google."
+    )
+    auth_check_parser.add_argument("--profile", choices=["readonly", "write"])
     auth_login = auth_sub.add_parser(
         "login", help="Open browser sign-in and save a token."
     )
@@ -689,6 +694,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.auth_command in {None, "status"}:
             profile = profile_from_name(getattr(args, "profile", None))
             print(json.dumps(auth_status(profile), indent=2))
+        elif args.auth_command == "check":
+            profile = profile_from_name(args.profile)
+            result = check_credentials(profile)
+            print(json.dumps(result, indent=2))
+            if result["check_status"] != "ok":
+                raise SystemExit(1)
         elif args.auth_command == "login":
             profile = profile_from_name(args.profile)
             get_credentials(profile, force_reauth=args.force, show_auth_url=True)

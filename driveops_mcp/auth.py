@@ -38,6 +38,14 @@ class AuthRefreshTransientError(RuntimeError):
     pass
 
 
+class AuthRefreshRejectedError(PermissionError):
+    """Google permanently rejected a saved OAuth refresh token."""
+
+    def __init__(self, message: str, *, error_code: str | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
 class _CommandBrowser(webbrowser.BaseBrowser):
     def __init__(self, command: list[str]) -> None:
         self.command = command
@@ -111,6 +119,23 @@ def _credentials_from_json(content: str, scopes: list[str]) -> Credentials:
         raise ValueError(
             "DRIVEOPS_GOOGLE_TOKEN_JSON is not a valid authorized-user token."
         ) from exc
+
+
+def _client_project_id() -> str | None:
+    secret = client_secret_path()
+    if not secret.is_file():
+        return None
+    try:
+        content = json.loads(secret.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(content, dict):
+        return None
+    for client_type in ("installed", "web"):
+        client = content.get(client_type)
+        if isinstance(client, dict) and isinstance(client.get("project_id"), str):
+            return client["project_id"]
+    return None
 
 
 def _secure_directory(path: Path) -> None:
@@ -219,6 +244,7 @@ def auth_status(profile: ScopeProfile | None = None) -> dict[str, object]:
         token_refreshable = bool(creds.refresh_token)
     return {
         "profile": profile,
+        "google_cloud_project_id": _client_project_id(),
         "client_secret_path": str(secret),
         "client_secret_present": secret.exists(),
         "token_path": str(token),
@@ -229,6 +255,7 @@ def auth_status(profile: ScopeProfile | None = None) -> dict[str, object]:
         "token_refreshable": token_refreshable,
         "has_required_scopes": has_required_scopes,
         "credentials_ready": has_required_scopes and (token_valid or token_refreshable),
+        "credentials_verified_online": False,
         "scopes": scopes_for_profile(profile),
     }
 
@@ -261,6 +288,111 @@ def _refresh_expired_credentials(creds: Credentials, request: Request) -> None:
             time.sleep(delay)
 
 
+def _refresh_error_details(exc: RefreshError) -> tuple[str | None, str | None]:
+    error_code: str | None = None
+    description: str | None = None
+    for value in exc.args:
+        if isinstance(value, dict):
+            raw_code = value.get("error")
+            raw_description = value.get("error_description")
+            if isinstance(raw_code, str):
+                error_code = raw_code
+            if isinstance(raw_description, str):
+                description = raw_description
+    return error_code, description
+
+
+def _refresh_rejected_error(
+    exc: RefreshError, profile: ScopeProfile
+) -> AuthRefreshRejectedError:
+    error_code, description = _refresh_error_details(exc)
+    detail = error_code or "refresh_rejected"
+    if description:
+        detail = f"{detail}: {description}"
+    message = (
+        f"Google rejected the saved OAuth refresh token ({detail}). "
+        f"Run `driveops-mcp auth login --profile {profile} --force` to reconnect. "
+        "If this recurs about every seven days, the Google OAuth app is probably "
+        "External + Testing. In Google Cloud Console, open Google Auth Platform > "
+        "Audience, change Publishing status to In production, and then reconnect "
+        "once. Retrying the same rejected token cannot repair it."
+    )
+    return AuthRefreshRejectedError(message, error_code=error_code)
+
+
+def check_credentials(profile: ScopeProfile | None = None) -> dict[str, object]:
+    """Force an online refresh to verify that saved credentials are durable."""
+
+    profile = profile or scope_profile()
+    scopes = scopes_for_profile(profile)
+    token = token_path()
+    injected_token = token_json()
+    status = auth_status(profile)
+
+    try:
+        if injected_token:
+            creds = _credentials_from_json(injected_token, scopes)
+        elif token.exists():
+            creds = Credentials.from_authorized_user_file(str(token), scopes)
+        else:
+            return {
+                **status,
+                "check_status": "missing",
+                "check_error": "No saved Google OAuth token was found.",
+            }
+    except (KeyError, TypeError, ValueError) as exc:
+        return {
+            **status,
+            "check_status": "invalid",
+            "check_error": f"The saved Google OAuth token is invalid: {exc}",
+        }
+
+    if not creds.has_scopes(scopes):
+        return {
+            **status,
+            "check_status": "wrong_scopes",
+            "check_error": (
+                "The saved token does not contain the scopes required by the "
+                f"{profile} profile."
+            ),
+        }
+    if not creds.refresh_token:
+        return {
+            **status,
+            "check_status": "not_refreshable",
+            "check_error": (
+                "The saved token has no refresh token and will stop working when "
+                "its access token expires."
+            ),
+        }
+
+    try:
+        _refresh_expired_credentials(creds, Request())
+    except AuthRefreshTransientError as exc:
+        return {
+            **status,
+            "check_status": "network_error",
+            "check_error": str(exc),
+        }
+    except RefreshError as exc:
+        rejected = _refresh_rejected_error(exc, profile)
+        return {
+            **status,
+            "check_status": "rejected",
+            "refresh_error_code": rejected.error_code,
+            "check_error": str(rejected),
+        }
+
+    if not injected_token:
+        _write_private_text(token, creds.to_json())
+    return {
+        **auth_status(profile),
+        "credentials_verified_online": True,
+        "check_status": "ok",
+        "check_error": None,
+    }
+
+
 def get_credentials(
     profile: ScopeProfile | None = None,
     *,
@@ -288,7 +420,6 @@ def get_credentials(
             raise ValueError(
                 "Cannot force reauthentication while DRIVEOPS_GOOGLE_TOKEN_JSON is set."
             )
-        token.unlink(missing_ok=True)
     elif injected_token:
         creds = _credentials_from_json(injected_token, scopes)
         if not creds.has_scopes(scopes):
@@ -310,18 +441,24 @@ def get_credentials(
             if not injected_token:
                 _write_private_text(token, creds.to_json())
             return creds
-        except RefreshError:
+        except RefreshError as exc:
+            rejected = _refresh_rejected_error(
+                exc, profile or scope_profile()
+            )
             if injected_token:
-                raise PermissionError(
-                    "The injected Google OAuth refresh token was rejected. Rotate "
-                    "DRIVEOPS_GOOGLE_TOKEN_JSON before restarting the service."
-                )
+                raise AuthRefreshRejectedError(
+                    f"{rejected} Replace DRIVEOPS_GOOGLE_TOKEN_JSON before "
+                    "restarting the service.",
+                    error_code=rejected.error_code,
+                ) from exc
+            print(str(rejected), file=sys.stderr)
             token.unlink(missing_ok=True)
             creds = None
 
     if injected_token:
         raise PermissionError(
-            "DRIVEOPS_GOOGLE_TOKEN_JSON is expired and cannot be refreshed. Rotate the hosted secret."
+            "DRIVEOPS_GOOGLE_TOKEN_JSON is expired and cannot be refreshed. "
+            "Rotate the hosted secret."
         )
 
     if not secret.exists():

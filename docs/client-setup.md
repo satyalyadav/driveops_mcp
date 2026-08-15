@@ -13,21 +13,31 @@ args = ["stdio"]
 cwd = "/home/satyal/gdrive-mcp"
 startup_timeout_sec = 120
 default_tools_approval_mode = "prompt"
+
+[mcp_servers.driveops.env]
+DRIVEOPS_SCOPE_PROFILE = "write"
+DRIVEOPS_GOOGLE_TOKEN = "/home/satyal/.config/driveops-mcp/token-write.json"
 ```
 
-The desktop app loads MCP servers when a thread starts. After editing config, start a new thread or restart the app/window. The first Drive tool call will trigger Google OAuth if no token exists, but the cleaner path is to run this once from a terminal first:
+The desktop app loads MCP servers when a thread starts. After editing config,
+start a new thread or restart the app/window. The first Drive tool call will
+trigger Google OAuth if no token exists, but the cleaner path is to authorize
+and check the exact configured token from a terminal first:
 
 ```bash
-/home/satyal/gdrive-mcp/.venv/bin/driveops-mcp auth login
-```
-
-The command above uses the effective `DRIVEOPS_SCOPE_PROFILE` and defaults to
-read-only. For a client configured with `DRIVEOPS_SCOPE_PROFILE=write`, you can
-make the intended consent profile explicit:
-
-```bash
+export DRIVEOPS_SCOPE_PROFILE=write
+export DRIVEOPS_GOOGLE_TOKEN=/home/satyal/.config/driveops-mcp/token-write.json
 /home/satyal/gdrive-mcp/.venv/bin/driveops-mcp auth login --profile write
+/home/satyal/gdrive-mcp/.venv/bin/driveops-mcp auth check --profile write
 ```
+
+The terminal commands must receive the same `DRIVEOPS_GOOGLE_TOKEN` and
+`DRIVEOPS_SCOPE_PROFILE` values as the MCP configuration. Environment variables
+inside the TOML server block are not automatically present in a separate shell.
+For read-only access, use `readonly` and either omit the custom token path or
+choose a separate read-only token path consistently.
+See [Durable Google OAuth Setup](google-oauth-setup.md) for a complete setup and
+the required External Testing vs. In production distinction.
 
 Google OAuth scopes are stored in the token. Switching an existing setup from
 read-only to write access therefore requires completing the write-profile

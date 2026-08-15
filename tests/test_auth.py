@@ -113,10 +113,126 @@ def test_auth_status_reports_expired_refreshable_token_as_ready(
     assert status["token_expired"] is True
     assert status["token_refreshable"] is True
     assert status["credentials_ready"] is True
+    assert status["credentials_verified_online"] is False
+
+
+def test_auth_status_reports_google_cloud_project_without_exposing_secret(
+    monkeypatch, tmp_path: Path
+) -> None:
+    secret = tmp_path / "client_secret.json"
+    secret.write_text(
+        '{"installed":{"project_id":"durable-oauth-project",'
+        '"client_secret":"do-not-return"}}'
+    )
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_CLIENT_SECRET", str(secret))
+
+    status = auth.auth_status("readonly")
+
+    assert status["google_cloud_project_id"] == "durable-oauth-project"
+    assert "do-not-return" not in str(status)
+
+
+def test_check_credentials_forces_online_refresh_and_persists_token(
+    monkeypatch, tmp_path: Path
+) -> None:
+    token = tmp_path / "token.json"
+    token.write_text('{"token": "old"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+
+    class FakeCredentials:
+        valid = True
+        expired = False
+        refresh_token = "refresh-token"
+
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            assert path == str(token)
+            assert scopes == auth.WRITE_SCOPES
+            return cls()
+
+        def has_scopes(self, scopes):
+            return scopes == auth.WRITE_SCOPES
+
+        def refresh(self, request):
+            self.valid = True
+            self.expired = False
+
+        def to_json(self):
+            return '{"token": "fresh"}'
+
+    monkeypatch.setattr(auth, "Credentials", FakeCredentials)
+
+    result = auth.check_credentials("write")
+
+    assert result["check_status"] == "ok"
+    assert result["credentials_verified_online"] is True
+    assert token.read_text() == '{"token": "fresh"}'
+
+
+def test_check_credentials_explains_seven_day_refresh_rejection_and_keeps_token(
+    monkeypatch, tmp_path: Path
+) -> None:
+    token = tmp_path / "token.json"
+    token.write_text('{"token": "old"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+
+    class FakeCredentials:
+        valid = False
+        expired = True
+        refresh_token = "refresh-token"
+
+        @classmethod
+        def from_authorized_user_file(cls, path, scopes):
+            return cls()
+
+        def has_scopes(self, scopes):
+            return True
+
+        def refresh(self, request):
+            raise auth.RefreshError(
+                "invalid_grant: Bad Request",
+                {
+                    "error": "invalid_grant",
+                    "error_description": "Token has been expired or revoked.",
+                },
+            )
+
+    monkeypatch.setattr(auth, "Credentials", FakeCredentials)
+
+    result = auth.check_credentials("write")
+
+    assert result["check_status"] == "rejected"
+    assert result["refresh_error_code"] == "invalid_grant"
+    assert "every seven days" in result["check_error"]
+    assert "Publishing status to In production" in result["check_error"]
+    assert token.read_text() == '{"token": "old"}'
+
+
+def test_auth_check_cli_uses_environment_profile_and_fails_when_rejected(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    calls = []
+
+    def fake_check_credentials(profile):
+        calls.append(profile)
+        return {"check_status": "rejected"}
+
+    monkeypatch.setattr(server, "check_credentials", fake_check_credentials)
+
+    with pytest.raises(SystemExit) as exc_info:
+        server.main(["auth", "check"])
+
+    assert exc_info.value.code == 1
+    assert calls == ["write"]
+    assert '"check_status": "rejected"' in capsys.readouterr().out
 
 
 def test_get_credentials_supports_injected_hosted_token(monkeypatch) -> None:
-    injected = '{"token":"access","refresh_token":"refresh","client_id":"id","client_secret":"secret"}'
+    injected = (
+        '{"token":"access","refresh_token":"refresh","client_id":"id",'
+        '"client_secret":"secret"}'
+    )
     monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN_JSON", injected)
 
     class FakeCredentials:
@@ -215,6 +331,62 @@ def test_get_credentials_restores_existing_oauthlib_scope_env(
     auth.get_credentials()
 
     assert auth.os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] == "existing"
+
+
+def test_force_reauth_keeps_existing_token_when_browser_flow_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    secret = tmp_path / "client_secret.json"
+    token = tmp_path / "token.json"
+    secret.write_text('{"installed": {"client_id": "id", "client_secret": "secret"}}')
+    token.write_text('{"token": "still-usable"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_CLIENT_SECRET", str(secret))
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+
+    class FakeFlow:
+        @classmethod
+        def from_client_secrets_file(cls, path, scopes):
+            return cls()
+
+        def run_local_server(self, **kwargs):
+            raise RuntimeError("browser authorization failed")
+
+    monkeypatch.setattr(auth, "InstalledAppFlow", FakeFlow)
+
+    with pytest.raises(RuntimeError, match="browser authorization failed"):
+        auth.get_credentials("write", force_reauth=True)
+
+    assert token.read_text() == '{"token": "still-usable"}'
+
+
+def test_force_reauth_replaces_existing_token_only_after_success(
+    monkeypatch, tmp_path: Path
+) -> None:
+    secret = tmp_path / "client_secret.json"
+    token = tmp_path / "token.json"
+    secret.write_text('{"installed": {"client_id": "id", "client_secret": "secret"}}')
+    token.write_text('{"token": "old"}')
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_CLIENT_SECRET", str(secret))
+    monkeypatch.setenv("DRIVEOPS_GOOGLE_TOKEN", str(token))
+
+    class FakeCredentials:
+        def to_json(self):
+            return '{"token": "new"}'
+
+    class FakeFlow:
+        @classmethod
+        def from_client_secrets_file(cls, path, scopes):
+            return cls()
+
+        def run_local_server(self, **kwargs):
+            assert token.read_text() == '{"token": "old"}'
+            return FakeCredentials()
+
+    monkeypatch.setattr(auth, "InstalledAppFlow", FakeFlow)
+
+    auth.get_credentials("write", force_reauth=True)
+
+    assert token.read_text() == '{"token": "new"}'
 
 
 def test_get_credentials_retries_transient_refresh_error(
