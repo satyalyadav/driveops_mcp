@@ -9,6 +9,8 @@ DriveOps MCP is a free, open-source, model-agnostic Google Drive toolkit for AI 
 
 Writes are planned, previewed, confirmed, audited, and reversible when possible.
 
+https://github.com/user-attachments/assets/3ab2b67e-b6b5-4a6a-9685-25fffdd5cd2a
+
 ## Install
 
 ```bash
