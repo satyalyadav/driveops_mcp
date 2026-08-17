@@ -37,6 +37,9 @@ token_cache.json
 # DriveOps local state
 driveops.db
 driveops.db-*
+driveops.key
+oauth.db
+oauth.db-*
 .driveops/
 
 # Environment variables
@@ -53,3 +56,7 @@ driveops.db-*
 # OS
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
+
+# Demo source is hosted as a GitHub attachment
+/driveops-demo.mp4

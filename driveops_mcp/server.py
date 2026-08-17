@@ -7,7 +7,8 @@ import ipaddress
 import json
 import os
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlsplit
 
 from mcp.server import MCPServer
@@ -22,7 +23,6 @@ from starlette.responses import JSONResponse
 
 from . import __version__
 from .audit import AuditStore
-from .backend import DriveBackend
 from .auth import (
     auth_status,
     check_credentials,
@@ -34,6 +34,7 @@ from .auth import (
     require_write_profile,
     scope_profile,
 )
+from .backend import DriveBackend
 from .google_drive import GoogleDriveClient
 from .http_security import (
     StaticTokenVerifier,

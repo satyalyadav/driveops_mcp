@@ -13,16 +13,13 @@ from .google_files import GoogleFilesMixin
 
 
 class GoogleDriveClient(GoogleFilesMixin, GoogleAccessMixin):
-    def __init__(
-        self, drive_service: Any | None = None, sheets_service: Any | None = None
-    ) -> None:
+    def __init__(self, drive_service: Any | None = None) -> None:
         if drive_service is None:
             creds = get_credentials()
             drive_service = build(
                 "drive", "v3", credentials=creds, cache_discovery=False
             )
         self.drive = drive_service
-        self.sheets = sheets_service
 
 
 __all__ = [

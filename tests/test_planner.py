@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -43,9 +43,19 @@ class FakeDrive:
         self.folders: dict[str, dict] = {}
 
     def list_folder(self, folder_id_or_name: str, page_size: int = 1000) -> dict:
-        children = list(self.files.values()) + list(self.folders.values())
+        folder_id = (
+            self.folder["id"]
+            if folder_id_or_name
+            in {self.folder.get("name"), self.folder.get("id"), "My Drive"}
+            else folder_id_or_name
+        )
+        children = [
+            item
+            for item in list(self.files.values()) + list(self.folders.values())
+            if folder_id in item.get("parents", []) and not item.get("trashed", False)
+        ]
         return {
-            "folder": self.folder,
+            "folder": dict(self.folders.get(folder_id, self.folder)),
             "count": len(children),
             "has_more": False,
             "files": [dict(x) for x in children],
@@ -118,6 +128,8 @@ class ActionFakeDrive(FakeDrive):
             return dict(match)
         raise KeyError(reference)
 
+    resolve_file_exact = resolve_file
+
     def resolve_folder(self, reference: str) -> dict:
         if reference in {"My Drive", "root"}:
             return {"id": "root", "name": "My Drive", "mimeType": GOOGLE_FOLDER_MIME}
@@ -131,6 +143,8 @@ class ActionFakeDrive(FakeDrive):
         if match:
             return dict(match)
         raise KeyError(reference)
+
+    resolve_folder_exact = resolve_folder
 
     def rename_file(self, file_id: str, new_name: str) -> dict:
         self.files[file_id]["name"] = new_name
@@ -183,6 +197,8 @@ class ActionFakeDrive(FakeDrive):
             "role": kwargs["role"],
             "emailAddress": kwargs.get("email_address"),
             "domain": kwargs.get("domain"),
+            "allowFileDiscovery": kwargs.get("allow_file_discovery"),
+            "expirationTime": kwargs.get("expiration_time"),
         }
         self.permissions[permission_id] = permission
         return dict(permission)
@@ -194,6 +210,9 @@ class ActionFakeDrive(FakeDrive):
     def delete_permission(self, file_id: str, permission_id: str) -> dict:
         self.permissions.pop(permission_id)
         return {"file_id": file_id, "permission_id": permission_id, "deleted": True}
+
+    def list_permissions(self, file_id_or_name: str, **kwargs) -> dict:
+        return {"permissions": [dict(item) for item in self.permissions.values()]}
 
 
 def store(tmp_path: Path) -> AuditStore:
@@ -446,6 +465,28 @@ def test_file_action_plan_rejects_multiple_content_sources(tmp_path: Path) -> No
         )
 
 
+def test_mutation_planning_requires_exact_resolution(tmp_path: Path) -> None:
+    class NoExactMatchDrive(ActionFakeDrive):
+        def resolve_file(self, reference: str) -> dict:
+            return dict(self.files["f1"])
+
+        def resolve_file_exact(self, reference: str) -> dict:
+            raise KeyError("no exact match")
+
+    planner = DriveOpsPlanner(NoExactMatchDrive(), store(tmp_path))
+
+    with pytest.raises(KeyError, match="no exact match"):
+        planner.plan_file_actions(
+            actions=[
+                {
+                    "type": "rename_file",
+                    "file_id_or_name": "fuzzy report",
+                    "new_name": "renamed.pdf",
+                }
+            ]
+        )
+
+
 def test_general_create_copy_share_and_redacted_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -487,6 +528,63 @@ def test_general_create_copy_share_and_redacted_preview(
     )
 
 
+def test_permission_changes_are_stale_checked_and_expiration_is_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    drive.permissions["perm1"]["expirationTime"] = "2026-09-01T00:00:00Z"
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    stale = planner.plan_file_actions(
+        actions=[
+            {
+                "type": "update_permission",
+                "file_id_or_name": "f1",
+                "permission_id": "perm1",
+                "role": "writer",
+            }
+        ]
+    )
+    drive.permissions["perm1"]["role"] = "commenter"
+
+    with pytest.raises(RuntimeError, match="permission perm1 changed"):
+        planner.apply_plan(plan_id=stale["plan_id"], confirmation=stale["confirmation"])
+
+    drive.permissions["perm1"]["role"] = "reader"
+    removal = planner.plan_file_actions(
+        actions=[
+            {
+                "type": "remove_permission",
+                "file_id_or_name": "f1",
+                "permission_id": "perm1",
+            }
+        ]
+    )
+    planner.apply_plan(plan_id=removal["plan_id"], confirmation=removal["confirmation"])
+    planner.undo_plan(
+        plan_id=removal["plan_id"], confirmation=removal["undo_confirmation"]
+    )
+
+    restored = next(iter(drive.permissions.values()))
+    assert restored["expirationTime"] == "2026-09-01T00:00:00Z"
+
+
+def test_ownership_transfer_is_not_supported(tmp_path: Path) -> None:
+    planner = DriveOpsPlanner(ActionFakeDrive(), store(tmp_path))
+
+    with pytest.raises(ValueError, match="unsupported permission role"):
+        planner.plan_file_actions(
+            actions=[
+                {
+                    "type": "share_file",
+                    "file_id_or_name": "f1",
+                    "email_address": "new-owner@example.com",
+                    "role": "owner",
+                }
+            ]
+        )
+
+
 def test_permanent_delete_plan_is_marked_irreversible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -505,11 +603,28 @@ def test_permanent_delete_plan_is_marked_irreversible(
         )
 
 
-def test_partially_applied_plan_can_be_undone(
+def test_partially_applied_plan_is_persisted_but_stale_undo_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
-    drive = ActionFakeDrive()
+
+    class ExternallyChangedDrive(ActionFakeDrive):
+        mutate_after_snapshot = False
+
+        def rename_file(self, file_id: str, new_name: str) -> dict:
+            result = super().rename_file(file_id, new_name)
+            if new_name == "first.pdf":
+                self.mutate_after_snapshot = True
+            return result
+
+        def get_file(self, file_id: str, fields: str | None = None) -> dict:
+            result = super().get_file(file_id, fields)
+            if self.mutate_after_snapshot and result.get("name") == "first.pdf":
+                self.mutate_after_snapshot = False
+                self.files[file_id]["modifiedTime"] = "2026-07-01T00:00:00"
+            return result
+
+    drive = ExternallyChangedDrive()
     planner = DriveOpsPlanner(drive, store(tmp_path))
     plan = planner.plan_file_actions(
         actions=[
@@ -523,8 +638,117 @@ def test_partially_applied_plan_can_be_undone(
     assert planner.audit.get_plan(plan["plan_id"])["status"] == "partially_applied"
     assert drive.files["f1"]["name"] == "first.pdf"
 
-    planner.undo_plan(plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"])
-    assert drive.files["f1"]["name"] == "alpha-report.pdf"
+    with pytest.raises(RuntimeError, match="changed after apply"):
+        planner.undo_plan(
+            plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+        )
+
+
+def test_permanent_delete_must_be_isolated(tmp_path: Path) -> None:
+    planner = DriveOpsPlanner(ActionFakeDrive(), store(tmp_path))
+
+    with pytest.raises(ValueError, match="own plan"):
+        planner.plan_file_actions(
+            actions=[
+                {"type": "delete_file", "file_id_or_name": "f1"},
+                {"type": "trash_file", "file_id_or_name": "f2"},
+            ]
+        )
+
+
+def test_apply_preserves_previewed_action_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+
+    class OrderedDrive(ActionFakeDrive):
+        calls: list[str]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = []
+
+        def create_file(self, **kwargs) -> dict:
+            self.calls.append("create_file")
+            return super().create_file(**kwargs)
+
+        def create_folder(self, name: str, parent_id: str) -> dict:
+            self.calls.append("create_folder")
+            return super().create_folder(name, parent_id)
+
+    drive = OrderedDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[
+            {"type": "create_file", "name": "first.txt"},
+            {"type": "create_folder", "name": "Second"},
+        ]
+    )
+
+    planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+
+    assert drive.calls == ["create_file", "create_folder"]
+
+
+def test_apply_refuses_changed_file_for_nonrename_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[{"type": "trash_file", "file_id_or_name": "f1"}]
+    )
+    drive.files["f1"]["modifiedTime"] = "2026-08-01T00:00:00"
+
+    with pytest.raises(RuntimeError, match="Stale plan"):
+        planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+
+    assert not drive.files["f1"].get("trashed", False)
+
+
+def test_undo_refuses_to_trash_created_file_after_user_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[{"type": "create_file", "name": "draft.txt"}]
+    )
+    planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+    applied = planner.audit.get_plan(plan["plan_id"])
+    file_id = applied["steps"][0]["created_file_id"]
+    drive.files[file_id]["name"] = "user-renamed.txt"
+
+    with pytest.raises(RuntimeError, match="created file"):
+        planner.undo_plan(
+            plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+        )
+
+    assert not drive.files[file_id].get("trashed", False)
+
+
+def test_undo_refuses_to_trash_created_folder_with_new_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DRIVEOPS_SCOPE_PROFILE", "write")
+    drive = ActionFakeDrive()
+    planner = DriveOpsPlanner(drive, store(tmp_path))
+    plan = planner.plan_file_actions(
+        actions=[{"type": "create_folder", "name": "Reports"}]
+    )
+    planner.apply_plan(plan_id=plan["plan_id"], confirmation=plan["confirmation"])
+    applied = planner.audit.get_plan(plan["plan_id"])
+    folder_id = applied["steps"][0]["created_folder_id"]
+    drive.create_file(name="user-note.txt", parent_id=folder_id)
+
+    with pytest.raises(RuntimeError, match="no longer empty"):
+        planner.undo_plan(
+            plan_id=plan["plan_id"], confirmation=plan["undo_confirmation"]
+        )
+
+    assert not drive.folders[folder_id].get("trashed", False)
 
 
 def test_partial_undo_is_persisted_and_retry_skips_completed_steps(
@@ -621,6 +845,8 @@ def test_plan_refuses_incomplete_folder_listing(tmp_path: Path) -> None:
 def test_hygiene_report_flags_common_drive_clutter(tmp_path: Path) -> None:
     drive = FakeDrive()
     drive.folder = {"id": "root", "name": "My Drive", "mimeType": GOOGLE_FOLDER_MIME}
+    drive.files["f1"]["parents"] = ["root"]
+    drive.files["f2"]["parents"] = ["root"]
     drive.files.update(
         {
             "dup_old": {

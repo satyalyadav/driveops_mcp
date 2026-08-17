@@ -11,7 +11,11 @@ class DriveBackend(Protocol):
 
     def resolve_file(self, file_id_or_name: str) -> dict[str, Any]: ...
 
+    def resolve_file_exact(self, file_id_or_name: str) -> dict[str, Any]: ...
+
     def resolve_folder(self, folder_id_or_name: str) -> dict[str, Any]: ...
+
+    def resolve_folder_exact(self, folder_id_or_name: str) -> dict[str, Any]: ...
 
     def get_file(self, file_id: str, fields: str | None = None) -> dict[str, Any]: ...
 
@@ -118,6 +122,7 @@ class DriveBackend(Protocol):
         domain: str | None = None,
         allow_file_discovery: bool | None = None,
         send_notification_email: bool = True,
+        expiration_time: str | None = None,
     ) -> dict[str, Any]: ...
 
     def update_permission(

@@ -3,13 +3,12 @@ from __future__ import annotations
 import threading
 
 import pytest
-
 from mcp import Client
 
-from driveops_mcp.audit import AuditStore
 from driveops_mcp import server as server_module
-from driveops_mcp.server import build_server, set_factories
+from driveops_mcp.audit import AuditStore
 from driveops_mcp.schemas import confirmation_for, now_iso, undo_confirmation_for
+from driveops_mcp.server import build_server, set_factories
 from tests.test_planner import ActionFakeDrive, FakeDrive
 
 

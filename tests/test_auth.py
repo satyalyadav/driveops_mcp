@@ -6,8 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from driveops_mcp import auth
-from driveops_mcp import server
+from driveops_mcp import auth, server
+
+
+def test_google_scopes_only_request_drive_access() -> None:
+    assert all("spreadsheets" not in scope for scope in auth.READONLY_SCOPES)
+    assert all("spreadsheets" not in scope for scope in auth.WRITE_SCOPES)
 
 
 def test_profile_from_name_uses_effective_environment_profile(monkeypatch) -> None:

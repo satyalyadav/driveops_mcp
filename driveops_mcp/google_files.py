@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 
 from .content import (
@@ -31,7 +32,6 @@ from .schemas import (
 
 class GoogleFilesMixin:
     drive: Any
-    sheets: Any
 
     @staticmethod
     def _escape(value: str) -> str:
@@ -88,14 +88,13 @@ class GoogleFilesMixin:
         )
 
     def resolve_file(self, file_id_or_name: str) -> dict[str, Any]:
+        """Resolve a file for read-only discovery, allowing a search fallback."""
+
         value = file_id_or_name.strip()
         if not value:
             raise DriveOpsError("file_id_or_name is required.")
         if self._looks_like_id(value):
-            try:
-                return self.get_file(value)
-            except Exception:
-                pass
+            return self.get_file(value)
 
         exact, has_more = self._exact_file_matches(value)
         if len(exact) > 1:
@@ -107,6 +106,24 @@ class GoogleFilesMixin:
         if files:
             return files[0]
         raise DriveOpsError(f"File '{file_id_or_name}' not found.")
+
+    def resolve_file_exact(self, file_id_or_name: str) -> dict[str, Any]:
+        """Resolve a mutation target only by Drive ID or exact unambiguous name."""
+
+        value = file_id_or_name.strip()
+        if not value:
+            raise DriveOpsError("file_id_or_name is required.")
+        if self._looks_like_id(value):
+            return self.get_file(value)
+        exact, has_more = self._exact_file_matches(value)
+        if len(exact) > 1 or (exact and has_more):
+            raise AmbiguousFileError(value, self.enrich_files(exact), has_more)
+        if exact:
+            return exact[0]
+        raise DriveOpsError(
+            f"File '{file_id_or_name}' was not found by exact name. "
+            "Search first and use the returned Drive file ID for mutations."
+        )
 
     def _exact_file_matches(
         self, value: str, max_matches: int = 6
@@ -121,9 +138,16 @@ class GoogleFilesMixin:
             supportsAllDrives=True,
             corpora="allDrives",
         )
-        return files, bool(next_page_token)
+        exact = [
+            item
+            for item in files
+            if (item.get("name") or "").casefold() == value.casefold()
+        ]
+        return exact, bool(next_page_token)
 
     def resolve_folder(self, folder_id_or_name: str) -> dict[str, Any]:
+        """Resolve a folder for read-only discovery, allowing a name search."""
+
         value = folder_id_or_name.strip()
         if not value:
             raise DriveOpsError("folder_id_or_name is required.")
@@ -171,6 +195,58 @@ class GoogleFilesMixin:
             return matches[0]
         raise DriveOpsError(f"Folder '{folder_id_or_name}' not found.")
 
+    def resolve_folder_exact(self, folder_id_or_name: str) -> dict[str, Any]:
+        """Resolve a mutation target folder by ID or exact unambiguous name."""
+
+        value = folder_id_or_name.strip()
+        if not value:
+            raise DriveOpsError("folder_id_or_name is required.")
+        if value.lower() in {"root", "my drive", "drive", "/"}:
+            return {
+                "id": "root",
+                "name": "My Drive",
+                "mimeType": GOOGLE_FOLDER_MIME,
+                "parents": [],
+            }
+        if self._looks_like_id(value):
+            folder = self.get_file(value, fields="id,name,mimeType,parents")
+            if folder.get("mimeType") != GOOGLE_FOLDER_MIME:
+                raise DriveOpsError(f"{value} is not a Google Drive folder.")
+            return folder
+
+        cleaned = value
+        if cleaned.lower().startswith("my ") and cleaned.lower() != "my drive":
+            cleaned = cleaned[3:].strip()
+        if cleaned.lower().endswith(" folder"):
+            cleaned = cleaned[:-7].strip()
+        safe = self._escape(cleaned)
+        candidates, next_page_token = self._execute_files_page(
+            max_items=6,
+            q=f"name = '{safe}' and mimeType = '{GOOGLE_FOLDER_MIME}' and trashed = false",
+            pageSize=6,
+            fields="nextPageToken,files(id,name,mimeType,parents,modifiedTime,webViewLink)",
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives",
+        )
+        matches = [
+            item
+            for item in candidates
+            if item.get("name", "").casefold() == cleaned.casefold()
+        ]
+        if len(matches) > 1 or (matches and next_page_token):
+            raise AmbiguousFolderError(
+                folder_id_or_name,
+                self.enrich_files(matches),
+                bool(next_page_token),
+            )
+        if matches:
+            return matches[0]
+        raise DriveOpsError(
+            f"Folder '{folder_id_or_name}' was not found by exact name. "
+            "List/search first and use the returned Drive folder ID for mutations."
+        )
+
     def folder_path(self, parent_id: str, cache: dict[str, str] | None = None) -> str:
         cache = cache if cache is not None else {}
         if not parent_id or parent_id == "root":
@@ -187,7 +263,7 @@ class GoogleFilesMixin:
                 path = f"{self.folder_path(parents[0], cache)} > {name}"
             cache[parent_id] = path
             return path
-        except Exception:
+        except (DriveOpsError, HttpError, KeyError):
             return "Unknown"
 
     def enrich_files(self, files: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -9,7 +9,7 @@ a token that works initially and is rejected about seven days later.
 In Google Cloud Console:
 
 1. Create or select a project.
-2. Enable the **Google Drive API** and **Google Sheets API**.
+2. Enable the **Google Drive API**.
 3. Open **Google Auth Platform** and configure the app name and support email.
 4. Under **Audience**, choose the appropriate user type:
    - **Internal** for users in a single Google Workspace or Cloud Identity
@@ -39,14 +39,12 @@ Read-only profile:
 ```text
 https://www.googleapis.com/auth/drive.metadata.readonly
 https://www.googleapis.com/auth/drive.readonly
-https://www.googleapis.com/auth/spreadsheets.readonly
 ```
 
 Write profile:
 
 ```text
 https://www.googleapis.com/auth/drive
-https://www.googleapis.com/auth/spreadsheets
 ```
 
 Then open **Clients**, create an OAuth client of type **Desktop app**, download

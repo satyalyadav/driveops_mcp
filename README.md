@@ -20,8 +20,8 @@ python3 -m venv .venv
 
 ## Google OAuth Setup
 
-Create a Google OAuth Desktop client with the Google Drive API and Google Sheets
-API enabled. For durable credentials, the Google Auth Platform publishing status
+Create a Google OAuth Desktop client with the Google Drive API enabled. For
+durable credentials, the Google Auth Platform publishing status
 must not remain **External + Testing**: Google expires those refresh tokens after
 seven days. Use **Internal** for one Workspace organization, or change an External
 app's Audience publishing status to **In production**. See the

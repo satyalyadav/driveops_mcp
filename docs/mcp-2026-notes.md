@@ -1,6 +1,6 @@
-# MCP 2026 Release-Candidate Notes
+# MCP 2026 Notes
 
-DriveOps MCP targets the MCP `2026-07-28` release candidate using `mcp[cli]==2.0.0a3`.
+DriveOps MCP targets MCP `2026-07-28` using the stable `mcp[cli]==2.0.0` SDK.
 
 Design choices:
 
@@ -11,9 +11,7 @@ Design choices:
 - schemas are designed to be JSON Schema 2020-12 compatible;
 - server instructions explain the plan-preview-apply workflow.
 
-The SDK v2 line is prerelease. Keep the dependency pinned exactly until the final SDK lands, then run the MCP contract tests before bumping.
-
-Expected follow-up after the final spec:
+Possible future follow-up:
 
 - verify `server/discover` behavior directly against the final SDK;
 - add official Tasks extension support for long folder scans if exposed by the SDK;

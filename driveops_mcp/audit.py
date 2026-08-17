@@ -9,22 +9,75 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from cryptography.fernet import Fernet, InvalidToken
 from mcp.server.auth.middleware.auth_context import get_access_token
 
 from .auth import state_dir
 from .schemas import now_iso
 
+ENCRYPTED_PLAN_PREFIX = "fernet:"
+
 
 class AuditStore:
-    def __init__(self, db_path: Path | None = None) -> None:
+    def __init__(
+        self, db_path: Path | None = None, key_path: Path | None = None
+    ) -> None:
         self.db_path = db_path or state_dir() / "driveops.db"
+        self.key_path = key_path or self.db_path.with_suffix(".key")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.key_path.parent.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
             self.db_path.parent.chmod(0o700)
         self.db_path.touch(mode=0o600, exist_ok=True)
         if os.name != "nt":
             self.db_path.chmod(0o600)
+        self._cipher = Fernet(self._load_encryption_key())
         self._init_db()
+
+    def _load_encryption_key(self) -> bytes:
+        configured = os.getenv("DRIVEOPS_PLAN_ENCRYPTION_KEY")
+        if configured:
+            key = configured.strip().encode("ascii")
+        else:
+            try:
+                fd = os.open(
+                    self.key_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(Fernet.generate_key() + b"\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            key = self.key_path.read_bytes().strip()
+            if os.name != "nt":
+                self.key_path.chmod(0o600)
+        try:
+            Fernet(key)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "DRIVEOPS_PLAN_ENCRYPTION_KEY (or the local key file) is not a valid Fernet key."
+            ) from exc
+        return key
+
+    def _encode_plan(self, plan: dict[str, Any]) -> str:
+        payload = json.dumps(plan, sort_keys=True).encode("utf-8")
+        return ENCRYPTED_PLAN_PREFIX + self._cipher.encrypt(payload).decode("ascii")
+
+    def _decode_plan(self, payload: str) -> dict[str, Any]:
+        if not payload.startswith(ENCRYPTED_PLAN_PREFIX):
+            return json.loads(payload)
+        token = payload.removeprefix(ENCRYPTED_PLAN_PREFIX).encode("ascii")
+        try:
+            raw = self._cipher.decrypt(token)
+        except InvalidToken as exc:
+            raise RuntimeError(
+                "A stored plan cannot be decrypted. Restore the encryption key used to create it."
+            ) from exc
+        return json.loads(raw)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -77,6 +130,16 @@ class AuditStore:
                 conn.execute("alter table audit_events add column actor_client_id text")
             if "actor_subject" not in columns:
                 conn.execute("alter table audit_events add column actor_subject text")
+            rows = conn.execute(
+                "select id, plan_json from plans where plan_json not like ?",
+                (f"{ENCRYPTED_PLAN_PREFIX}%",),
+            ).fetchall()
+            for row in rows:
+                plan = json.loads(row["plan_json"])
+                conn.execute(
+                    "update plans set plan_json = ? where id = ?",
+                    (self._encode_plan(plan), row["id"]),
+                )
 
     def save_plan(self, plan: dict[str, Any]) -> None:
         ts = now_iso()
@@ -98,7 +161,7 @@ class AuditStore:
                     plan["strategy"],
                     plan["folder"]["id"],
                     int(bool(plan.get("dry_run", True))),
-                    json.dumps(plan, sort_keys=True),
+                    self._encode_plan(plan),
                     plan.get("error"),
                 ),
             )
@@ -110,7 +173,7 @@ class AuditStore:
             ).fetchone()
         if row is None:
             raise KeyError(f"Plan {plan_id} not found.")
-        return json.loads(row["plan_json"])
+        return self._decode_plan(row["plan_json"])
 
     def latest_plan(
         self, *, status: str | None = None, statuses: set[str] | None = None
@@ -133,7 +196,7 @@ class AuditStore:
             requested = status or ", ".join(sorted(statuses or []))
             suffix = f" with status {requested}" if requested else ""
             raise KeyError(f"No DriveOps plan{suffix} found.")
-        return json.loads(row["plan_json"])
+        return self._decode_plan(row["plan_json"])
 
     def update_plan(
         self,
@@ -157,7 +220,7 @@ class AuditStore:
                 (
                     plan["status"],
                     plan["updated_at"],
-                    json.dumps(plan, sort_keys=True),
+                    self._encode_plan(plan),
                     plan.get("error"),
                     plan["plan_id"],
                 ),
@@ -186,7 +249,7 @@ class AuditStore:
                 raise ValueError(
                     f"Plan {plan_id} is {row['status']}; expected one of: {expected}."
                 )
-            plan = json.loads(row["plan_json"])
+            plan = self._decode_plan(row["plan_json"])
             plan["status"] = claimed_status
             plan["updated_at"] = now_iso()
             conn.execute(
@@ -198,7 +261,7 @@ class AuditStore:
                 (
                     claimed_status,
                     plan["updated_at"],
-                    json.dumps(plan, sort_keys=True),
+                    self._encode_plan(plan),
                     plan_id,
                 ),
             )

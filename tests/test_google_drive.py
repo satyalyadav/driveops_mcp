@@ -6,8 +6,7 @@ import zipfile
 
 import pytest
 
-from driveops_mcp import content
-from driveops_mcp import google_drive
+from driveops_mcp import content, google_drive
 from driveops_mcp.google_drive import (
     AmbiguousFolderError,
     DriveOpsError,
@@ -31,7 +30,6 @@ def test_google_client_builds_only_drive_without_discovery_cache(monkeypatch) ->
     client = GoogleDriveClient()
 
     assert client.drive is drive_service
-    assert client.sheets is None
     assert calls == [
         (
             "drive",
@@ -111,6 +109,34 @@ def test_read_file_resolves_name() -> None:
     assert result["text"] == "hello from notes"
 
 
+def test_exact_mutation_resolution_never_uses_a_fuzzy_match() -> None:
+    class Files:
+        def list(self, **kwargs):
+            class Call:
+                def execute(self):
+                    return {
+                        "files": [
+                            {
+                                "id": "quarterly_budget_12345",
+                                "name": "Quarterly Budget 2026",
+                                "mimeType": "application/pdf",
+                                "parents": ["root"],
+                            }
+                        ]
+                    }
+
+            return Call()
+
+    class Service:
+        def files(self):
+            return Files()
+
+    client = GoogleDriveClient(drive_service=Service())
+
+    with pytest.raises(DriveOpsError, match="not found by exact name"):
+        client.resolve_file_exact("Budget")
+
+
 def test_resolve_folder_rejects_non_folder_id() -> None:
     folder_id = "abc1234567890123456789"
 
@@ -131,12 +157,8 @@ def test_resolve_folder_rejects_non_folder_id() -> None:
             return Files()
 
     client = GoogleDriveClient(drive_service=Service())
-    try:
+    with pytest.raises(DriveOpsError, match="not a Google Drive folder"):
         client.resolve_folder(folder_id)
-    except Exception as exc:
-        assert "not a Google Drive folder" in str(exc)
-    else:
-        raise AssertionError("Expected resolve_folder to reject a non-folder ID")
 
 
 def test_resolve_folder_rejects_ambiguous_names() -> None:

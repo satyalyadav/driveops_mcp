@@ -19,9 +19,18 @@ from .schemas import (
     undo_confirmation_for,
 )
 
-
 MAX_PLAN_ITEMS = 1000
 DEFAULT_ARCHIVE_FOLDER = "DriveOps Review - Duplicates"
+FILE_STATE_FIELDS = (
+    "id,name,mimeType,parents,trashed,modifiedTime,version,md5Checksum,size,webViewLink"
+)
+SUPPORTED_PERMISSION_ROLES = {
+    "reader",
+    "commenter",
+    "writer",
+    "fileOrganizer",
+    "organizer",
+}
 SENSITIVE_NAME_RE = re.compile(
     r"\b("
     r"1099|bank|credential|credentials|insurance|license|medical|passport|"
@@ -118,6 +127,37 @@ def _compact_file(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _file_state(item: dict[str, Any]) -> dict[str, Any]:
+    """Return the stable fields used to detect changes after a preview."""
+
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "mimeType": item.get("mimeType"),
+        "parents": sorted(item.get("parents") or []),
+        "trashed": bool(item.get("trashed", False)),
+        "modifiedTime": item.get("modifiedTime"),
+        "version": item.get("version"),
+        "md5Checksum": item.get("md5Checksum"),
+        "size": item.get("size"),
+    }
+
+
+def _permission_state(item: dict[str, Any]) -> dict[str, Any]:
+    """Return permission fields whose changes make a stored plan stale."""
+
+    return {
+        "id": item.get("id"),
+        "type": item.get("type"),
+        "role": item.get("role"),
+        "emailAddress": item.get("emailAddress"),
+        "domain": item.get("domain"),
+        "expirationTime": item.get("expirationTime"),
+        "allowFileDiscovery": item.get("allowFileDiscovery"),
+        "deleted": bool(item.get("deleted", False)),
+    }
+
+
 class DriveOpsPlanner:
     def __init__(self, drive: DriveBackend | None, audit_store: AuditStore) -> None:
         self.drive = drive
@@ -153,7 +193,7 @@ class DriveOpsPlanner:
 
             if kind == "create_folder":
                 name = self._required(action, "name", index)
-                parent = drive.resolve_folder(
+                parent = drive.resolve_folder_exact(
                     str(action.get("parent_id_or_name") or "My Drive")
                 )
                 step.update(
@@ -198,7 +238,7 @@ class DriveOpsPlanner:
                     raise ValueError(
                         "Inline base64 uploads are limited to about 5 MB; use local_path for larger files."
                     )
-                parent = drive.resolve_folder(
+                parent = drive.resolve_folder_exact(
                     str(action.get("parent_id_or_name") or "My Drive")
                 )
                 step.update(
@@ -222,10 +262,10 @@ class DriveOpsPlanner:
                 "remove_permission",
             }:
                 reference = self._required(action, "file_id_or_name", index)
-                file = drive.resolve_file(reference)
+                file = drive.resolve_file_exact(reference)
                 current = drive.get_file(
                     file["id"],
-                    fields="id,name,mimeType,parents,trashed,modifiedTime,webViewLink",
+                    fields=FILE_STATE_FIELDS,
                 )
                 step.update(
                     file_id=current["id"], file_name=current.get("name"), before=current
@@ -235,14 +275,16 @@ class DriveOpsPlanner:
                 elif kind == "copy_file":
                     parent_ref = action.get("parent_id_or_name")
                     parent = (
-                        drive.resolve_folder(str(parent_ref)) if parent_ref else None
+                        drive.resolve_folder_exact(str(parent_ref))
+                        if parent_ref
+                        else None
                     )
                     step.update(
                         new_name=action.get("new_name"),
                         parent_id=parent["id"] if parent else None,
                     )
                 elif kind == "move_file":
-                    target = drive.resolve_folder(
+                    target = drive.resolve_folder_exact(
                         self._required(action, "target_folder_id_or_name", index)
                     )
                     parents = current.get("parents", [])
@@ -268,14 +310,7 @@ class DriveOpsPlanner:
                         raise ValueError(
                             f"Action {index + 1}: unsupported permission_type."
                         )
-                    if role not in {
-                        "reader",
-                        "commenter",
-                        "writer",
-                        "fileOrganizer",
-                        "organizer",
-                        "owner",
-                    }:
+                    if role not in SUPPORTED_PERMISSION_ROLES:
                         raise ValueError(
                             f"Action {index + 1}: unsupported permission role."
                         )
@@ -305,12 +340,22 @@ class DriveOpsPlanner:
                     )
                     if kind == "update_permission":
                         step["role"] = self._required(action, "role", index)
+                        if step["role"] not in SUPPORTED_PERMISSION_ROLES:
+                            raise ValueError(
+                                f"Action {index + 1}: unsupported permission role."
+                            )
                 elif kind == "delete_file":
                     step["irreversible"] = True
                     irreversible += 1
             else:
                 raise ValueError(f"Action {index + 1} has unsupported type '{kind}'.")
             steps.append(step)
+
+        if irreversible and irreversible != len(steps):
+            raise ValueError(
+                "Permanent deletes must be placed in their own plan so reversible "
+                "actions can always be undone independently."
+            )
 
         plan_id = str(uuid.uuid4())
         counts: dict[str, int] = {}
@@ -825,84 +870,74 @@ class DriveOpsPlanner:
         )
 
         created_by_name: dict[str, str] = {}
+        expected_files: dict[str, dict[str, Any]] = {}
+        expected_permissions: dict[tuple[str, str], dict[str, Any]] = {}
         try:
             for step in plan["steps"]:
-                if step["type"] != "create_folder":
-                    continue
-                drive = self._drive()
-                existing = None
-                if not step.get("generic_action"):
-                    existing = drive.find_child_folder(
-                        step["parent_id"], step["folder_name"]
-                    )
-                folder = existing or drive.create_folder(
-                    step["folder_name"], step["parent_id"]
-                )
-                step["created_folder_id"] = folder["id"]
-                step["created_new"] = existing is None
-                step["status"] = "applied"
-                created_by_name[step["folder_name"]] = folder["id"]
-                self.audit.append_event(
-                    action="create_folder",
-                    status="ok",
-                    plan_id=plan_id,
-                    subject_id=folder["id"],
-                    after=folder,
-                    message=f"Ensured folder {step['folder_name']}.",
-                )
-
-            for step in plan["steps"]:
-                if step["type"] != "move_file":
-                    continue
-                drive = self._drive()
-                current = drive.get_file(
-                    step["file_id"], fields="id,name,mimeType,parents,modifiedTime"
-                )
-                parents = current.get("parents", [])
-                if step["source_parent_id"] not in parents:
-                    raise RuntimeError(
-                        f"Stale plan: file {step['file_name']} no longer has source parent {step['source_parent_id']}."
-                    )
-                target_id = step.get("target_folder_id") or created_by_name.get(
-                    step["target_folder_name"]
-                )
-                if not target_id:
-                    target = drive.find_child_folder(
-                        plan["folder"]["id"], step["target_folder_name"]
-                    )
-                    if not target:
-                        raise RuntimeError(
-                            f"Target folder {step['target_folder_name']} was not created."
-                        )
-                    target_id = target["id"]
-                moved = drive.move_file(
-                    step["file_id"], target_id, step["source_parent_id"]
-                )
-                step["target_folder_id"] = target_id
-                step["after_parents"] = moved.get("parents", [])
-                step["status"] = "applied"
-                self.audit.append_event(
-                    action="move_file",
-                    status="ok",
-                    plan_id=plan_id,
-                    subject_id=step["file_id"],
-                    before={"parents": parents},
-                    after={"parents": moved.get("parents", [])},
-                    message=f"Moved {step['file_name']} to {step['target_folder_name']}.",
-                )
-
-            for step in plan["steps"]:
-                if step["type"] in {"create_folder", "move_file"}:
-                    continue
                 drive = self._drive()
                 kind = step["type"]
                 before = step.get("before")
-                if kind in {"create_file", "upload_file"}:
+                subject_id = step.get("file_id")
+
+                if kind == "create_folder":
+                    existing = None
+                    if not step.get("generic_action"):
+                        existing = drive.find_child_folder(
+                            step["parent_id"], step["folder_name"]
+                        )
+                    result = existing or drive.create_folder(
+                        step["folder_name"], step["parent_id"]
+                    )
+                    step["created_folder_id"] = result["id"]
+                    step["created_new"] = existing is None
+                    subject_id = result["id"]
+                    created_by_name[step["folder_name"]] = result["id"]
+                    step["applied_file_state"] = _file_state(
+                        drive.get_file(result["id"], fields=FILE_STATE_FIELDS)
+                    )
+                elif kind == "move_file":
+                    current = drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    current_state = _file_state(current)
+                    expected = expected_files.get(step["file_id"])
+                    if expected is None and before:
+                        expected = _file_state(before)
+                    if expected is not None and current_state != expected:
+                        raise RuntimeError(
+                            f"Stale plan: {step['file_name']} changed after preview."
+                        )
+                    parents = current.get("parents", [])
+                    if step["source_parent_id"] not in parents:
+                        raise RuntimeError(
+                            f"Stale plan: file {step['file_name']} no longer has source "
+                            f"parent {step['source_parent_id']}."
+                        )
+                    target_id = step.get("target_folder_id") or created_by_name.get(
+                        step["target_folder_name"]
+                    )
+                    if not target_id:
+                        target = drive.find_child_folder(
+                            plan["folder"]["id"], step["target_folder_name"]
+                        )
+                        if not target:
+                            raise RuntimeError(
+                                f"Target folder {step['target_folder_name']} was not created."
+                            )
+                        target_id = target["id"]
+                    result = drive.move_file(
+                        step["file_id"], target_id, step["source_parent_id"]
+                    )
+                    step["target_folder_id"] = target_id
+                    step["after_parents"] = result.get("parents", [])
+                    step["applied_file_state"] = _file_state(
+                        drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    )
+                    expected_files[step["file_id"]] = step["applied_file_state"]
+                elif kind in {"create_file", "upload_file"}:
                     if step.get("local_path") and step.get("source_snapshot"):
                         source = Path(step["local_path"]).expanduser()
                         if not source.is_file():
                             raise RuntimeError(
-                                f"Stale plan: upload source no longer exists: {source}"
+                                "Stale plan: upload source no longer exists."
                             )
                         snapshot = step["source_snapshot"]
                         if (
@@ -910,7 +945,7 @@ class DriveOpsPlanner:
                             or source.stat().st_mtime_ns != snapshot["modified_ns"]
                         ):
                             raise RuntimeError(
-                                f"Stale plan: upload source changed after preview: {source}"
+                                "Stale plan: upload source changed after preview."
                             )
                     result = drive.create_file(
                         name=step["file_name"],
@@ -921,14 +956,20 @@ class DriveOpsPlanner:
                         local_path=step.get("local_path"),
                     )
                     step["created_file_id"] = result["id"]
-                elif kind == "rename_file":
-                    current = drive.get_file(
-                        step["file_id"], fields="id,name,modifiedTime"
+                    subject_id = result["id"]
+                    step["applied_file_state"] = _file_state(
+                        drive.get_file(result["id"], fields=FILE_STATE_FIELDS)
                     )
-                    if current.get("name") != before.get("name"):
+                else:
+                    current = drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    current_state = _file_state(current)
+                    expected = expected_files.get(step["file_id"], _file_state(before))
+                    if current_state != expected:
                         raise RuntimeError(
-                            f"Stale plan: {step['file_name']} was renamed after preview."
+                            f"Stale plan: {step['file_name']} changed after preview."
                         )
+
+                if kind == "rename_file":
                     result = drive.rename_file(step["file_id"], step["new_name"])
                 elif kind == "copy_file":
                     result = drive.copy_file(
@@ -937,6 +978,7 @@ class DriveOpsPlanner:
                         parent_id=step.get("parent_id"),
                     )
                     step["created_file_id"] = result["id"]
+                    subject_id = result["id"]
                 elif kind == "trash_file":
                     result = drive.set_trashed(step["file_id"], True)
                 elif kind == "restore_file":
@@ -956,40 +998,102 @@ class DriveOpsPlanner:
                         ),
                     )
                     step["created_permission_id"] = result["id"]
+                    step["applied_permission"] = _permission_state(
+                        drive.get_permission(step["file_id"], result["id"])
+                    )
+                    expected_permissions[(step["file_id"], result["id"])] = step[
+                        "applied_permission"
+                    ]
                 elif kind == "update_permission":
+                    permission_key = (step["file_id"], step["permission_id"])
+                    current_permission = _permission_state(
+                        drive.get_permission(*permission_key)
+                    )
+                    expected_permission = expected_permissions.get(
+                        permission_key, _permission_state(step["before_permission"])
+                    )
+                    if current_permission != expected_permission:
+                        raise RuntimeError(
+                            f"Stale plan: permission {step['permission_id']} changed after preview."
+                        )
                     result = drive.update_permission(
                         step["file_id"], step["permission_id"], step["role"]
                     )
+                    step["applied_permission"] = _permission_state(
+                        drive.get_permission(*permission_key)
+                    )
+                    expected_permissions[permission_key] = step["applied_permission"]
                 elif kind == "remove_permission":
+                    permission_key = (step["file_id"], step["permission_id"])
+                    current_permission = _permission_state(
+                        drive.get_permission(*permission_key)
+                    )
+                    expected_permission = expected_permissions.get(
+                        permission_key, _permission_state(step["before_permission"])
+                    )
+                    if current_permission != expected_permission:
+                        raise RuntimeError(
+                            f"Stale plan: permission {step['permission_id']} changed after preview."
+                        )
                     result = drive.delete_permission(
                         step["file_id"], step["permission_id"]
                     )
+                    expected_permissions.pop(permission_key, None)
+                    step["applied_permission"] = None
                 else:
-                    raise RuntimeError(f"Unsupported planned action: {kind}")
+                    if kind not in {
+                        "create_folder",
+                        "move_file",
+                        "create_file",
+                        "upload_file",
+                    }:
+                        raise RuntimeError(f"Unsupported planned action: {kind}")
+
+                if kind in {
+                    "rename_file",
+                    "trash_file",
+                    "restore_file",
+                }:
+                    step["applied_file_state"] = _file_state(
+                        drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    )
+                    expected_files[step["file_id"]] = step["applied_file_state"]
+                elif kind == "copy_file":
+                    step["applied_file_state"] = _file_state(
+                        drive.get_file(
+                            step["created_file_id"], fields=FILE_STATE_FIELDS
+                        )
+                    )
+                elif kind in {"share_file", "update_permission", "remove_permission"}:
+                    expected_files[step["file_id"]] = current_state
+                elif kind == "delete_file":
+                    expected_files.pop(step["file_id"], None)
+
                 step["after"] = result
                 step["status"] = "applied"
+                self.audit.update_plan(plan, status="applying")
                 self.audit.append_event(
                     action=kind,
                     status="ok",
                     plan_id=plan_id,
-                    subject_id=step.get("file_id") or step.get("created_file_id"),
+                    subject_id=subject_id,
                     before=before or step.get("before_permission"),
                     after=result,
                     message=f"Applied {kind}.",
                 )
         except Exception as exc:
             partial = any(step.get("status") == "applied" for step in plan["steps"])
+            self.audit.update_plan(
+                plan,
+                status="partially_applied" if partial else "failed",
+                error=str(exc),
+            )
             self.audit.append_event(
                 action="apply_plan",
                 status="failed",
                 plan_id=plan_id,
                 subject_id=plan["folder"]["id"],
                 message=str(exc),
-            )
-            self.audit.update_plan(
-                plan,
-                status="partially_applied" if partial else "failed",
-                error=str(exc),
             )
             raise
 
@@ -1035,6 +1139,7 @@ class DriveOpsPlanner:
         )
 
         undone = sum(step.get("undo_status") == "undone" for step in plan["steps"])
+        undo_expected_files: dict[str, dict[str, Any]] = {}
         try:
             for step in reversed(plan["steps"]):
                 if step.get("status") != "applied" or step.get("undo_status"):
@@ -1048,9 +1153,14 @@ class DriveOpsPlanner:
                     target_id = step.get("target_folder_id")
                     if not target_id:
                         continue
-                    current = drive.get_file(
-                        step["file_id"], fields="id,name,mimeType,parents,modifiedTime"
+                    current = drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    expected_state = undo_expected_files.get(
+                        step["file_id"], step.get("applied_file_state")
                     )
+                    if _file_state(current) != expected_state:
+                        raise RuntimeError(
+                            f"Cannot undo: file {step['file_name']} changed after apply."
+                        )
                     parents = current.get("parents", [])
                     if target_id not in parents:
                         raise RuntimeError(
@@ -1066,21 +1176,68 @@ class DriveOpsPlanner:
                         self.audit.update_plan(plan, status="undoing")
                         continue
                     subject_id = step.get("created_folder_id")
+                    current = drive.get_file(subject_id, fields=FILE_STATE_FIELDS)
+                    if _file_state(current) != step.get("applied_file_state"):
+                        raise RuntimeError(
+                            f"Cannot undo: created folder {step['folder_name']} changed after apply."
+                        )
+                    contents = drive.list_folder(subject_id, page_size=1)
+                    if contents.get("files"):
+                        raise RuntimeError(
+                            f"Cannot undo: created folder {step['folder_name']} is no longer empty."
+                        )
                     after = drive.set_trashed(subject_id, True)
                 elif kind in {"create_file", "upload_file", "copy_file"}:
                     subject_id = step.get("created_file_id")
+                    current = drive.get_file(subject_id, fields=FILE_STATE_FIELDS)
+                    if _file_state(current) != step.get("applied_file_state"):
+                        raise RuntimeError(
+                            f"Cannot undo: created file {subject_id} changed after apply."
+                        )
                     after = drive.set_trashed(subject_id, True)
                 elif kind == "rename_file":
+                    current = drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    expected_state = undo_expected_files.get(
+                        step["file_id"], step.get("applied_file_state")
+                    )
+                    if _file_state(current) != expected_state:
+                        raise RuntimeError(
+                            f"Cannot undo: file {step['file_name']} changed after apply."
+                        )
                     after = drive.rename_file(step["file_id"], step["before"]["name"])
                 elif kind in {"trash_file", "restore_file"}:
+                    current = drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    expected_state = undo_expected_files.get(
+                        step["file_id"], step.get("applied_file_state")
+                    )
+                    if _file_state(current) != expected_state:
+                        raise RuntimeError(
+                            f"Cannot undo: file {step['file_name']} changed after apply."
+                        )
                     after = drive.set_trashed(
                         step["file_id"], bool(step["before"].get("trashed", False))
                     )
                 elif kind == "share_file":
+                    current_permission = _permission_state(
+                        drive.get_permission(
+                            step["file_id"], step["created_permission_id"]
+                        )
+                    )
+                    if current_permission != step.get("applied_permission"):
+                        raise RuntimeError(
+                            f"Cannot undo: permission {step['created_permission_id']} changed after apply."
+                        )
                     after = drive.delete_permission(
                         step["file_id"], step["created_permission_id"]
                     )
                 elif kind == "update_permission":
+                    current_permission = _permission_state(
+                        drive.get_permission(step["file_id"], step["permission_id"])
+                    )
+                    if current_permission != step.get("applied_permission"):
+                        raise RuntimeError(
+                            f"Cannot undo: permission {step['permission_id']} changed after apply."
+                        )
                     after = drive.update_permission(
                         step["file_id"],
                         step["permission_id"],
@@ -1088,6 +1245,31 @@ class DriveOpsPlanner:
                     )
                 elif kind == "remove_permission":
                     permission = step["before_permission"]
+                    permission_listing = drive.list_permissions(
+                        step["file_id"], page_size=100
+                    )
+                    if permission_listing.get("has_more"):
+                        raise RuntimeError(
+                            "Cannot undo safely: the file has more than 100 permissions."
+                        )
+                    permissions = permission_listing.get("permissions", [])
+                    identity = (
+                        permission.get("type"),
+                        permission.get("emailAddress"),
+                        permission.get("domain"),
+                    )
+                    if any(
+                        (
+                            item.get("type"),
+                            item.get("emailAddress"),
+                            item.get("domain"),
+                        )
+                        == identity
+                        for item in permissions
+                    ):
+                        raise RuntimeError(
+                            "Cannot undo: equivalent access was added after apply."
+                        )
                     after = drive.create_permission(
                         step["file_id"],
                         permission_type=permission["type"],
@@ -1096,11 +1278,17 @@ class DriveOpsPlanner:
                         domain=permission.get("domain"),
                         allow_file_discovery=permission.get("allowFileDiscovery"),
                         send_notification_email=False,
+                        expiration_time=permission.get("expirationTime"),
                     )
                 else:
                     continue
+                if kind in {"move_file", "rename_file", "trash_file", "restore_file"}:
+                    undo_expected_files[step["file_id"]] = _file_state(
+                        drive.get_file(step["file_id"], fields=FILE_STATE_FIELDS)
+                    )
                 step["undo_status"] = "undone"
                 undone += 1
+                self.audit.update_plan(plan, status="undoing")
                 self.audit.append_event(
                     action=f"undo_{kind}",
                     status="ok",
@@ -1110,19 +1298,18 @@ class DriveOpsPlanner:
                     after=after,
                     message=f"Undid {kind}.",
                 )
-                self.audit.update_plan(plan, status="undoing")
         except Exception as exc:
+            self.audit.update_plan(
+                plan,
+                status="partially_undone" if undone else preview["status"],
+                error=str(exc),
+            )
             self.audit.append_event(
                 action="undo_plan",
                 status="failed",
                 plan_id=plan_id,
                 subject_id=plan["folder"]["id"],
                 message=str(exc),
-            )
-            self.audit.update_plan(
-                plan,
-                status="partially_undone" if undone else preview["status"],
-                error=str(exc),
             )
             raise
 

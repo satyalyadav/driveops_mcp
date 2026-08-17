@@ -75,8 +75,7 @@ class DriveFileAction(BaseModel):
         default=None, description="Audience type for share_file; defaults to user."
     )
     role: (
-        Literal["reader", "commenter", "writer", "fileOrganizer", "organizer", "owner"]
-        | None
+        Literal["reader", "commenter", "writer", "fileOrganizer", "organizer"] | None
     ) = Field(default=None, description="Drive permission role.")
     email_address: str | None = Field(
         default=None, description="User or group email for share_file."

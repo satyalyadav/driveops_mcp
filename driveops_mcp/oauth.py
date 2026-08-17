@@ -17,8 +17,8 @@ from urllib.parse import urlsplit
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
-    AuthorizeError,
     AuthorizationParams,
+    AuthorizeError,
     RefreshToken,
     RegistrationError,
     TokenError,
@@ -35,7 +35,11 @@ OAUTH_SCOPES = ["driveops"]
 AUTHORIZATION_TTL_SECONDS = 10 * 60
 ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
-MAX_REGISTERED_CLIENTS = 50
+PENDING_CLIENT_TTL_SECONDS = 15 * 60
+MAX_PENDING_CLIENTS = 50
+MAX_PENDING_AUTHORIZATIONS = 50
+OAUTH_EVENT_RETENTION_SECONDS = 90 * 24 * 60 * 60
+MAX_OAUTH_EVENTS = 10_000
 
 
 def _token_hash(token: str) -> str:
@@ -68,10 +72,13 @@ class OAuthStore:
                 create table if not exists oauth_clients (
                     client_id text primary key,
                     client_json text not null,
-                    created_at integer not null
+                    created_at integer not null,
+                    approved integer not null default 0,
+                    expires_at integer
                 );
                 create table if not exists oauth_pending (
                     request_hash text primary key,
+                    client_id text,
                     request_json text not null,
                     expires_at integer not null,
                     attempts integer not null default 0
@@ -106,6 +113,25 @@ class OAuthStore:
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("pragma table_info(oauth_clients)").fetchall()
+            }
+            if "approved" not in columns:
+                conn.execute(
+                    "alter table oauth_clients add column approved integer not null default 1"
+                )
+            if "expires_at" not in columns:
+                conn.execute("alter table oauth_clients add column expires_at integer")
+            pending_columns = {
+                row["name"]
+                for row in conn.execute("pragma table_info(oauth_pending)").fetchall()
+            }
+            if "client_id" not in pending_columns:
+                conn.execute("alter table oauth_pending add column client_id text")
+            conn.execute(
+                "create index if not exists oauth_pending_client on oauth_pending(client_id)"
+            )
 
     def event(self, event: str, status: str, client_id: str | None = None) -> None:
         with self._connect() as conn:
@@ -117,6 +143,10 @@ class OAuthStore:
     def cleanup(self) -> None:
         now = int(time.time())
         with self._connect() as conn:
+            conn.execute(
+                "delete from oauth_clients where approved = 0 and expires_at <= ?",
+                (now,),
+            )
             for table in (
                 "oauth_pending",
                 "oauth_codes",
@@ -124,6 +154,20 @@ class OAuthStore:
                 "oauth_refresh_tokens",
             ):
                 conn.execute(f"delete from {table} where expires_at <= ?", (now,))
+            conn.execute(
+                "delete from oauth_events where created_at <= ?",
+                (now - OAUTH_EVENT_RETENTION_SECONDS,),
+            )
+            conn.execute(
+                """
+                delete from oauth_events where id in (
+                    select id from oauth_events
+                    order by created_at desc, rowid desc
+                    limit -1 offset ?
+                )
+                """,
+                (MAX_OAUTH_EVENTS,),
+            )
 
 
 class SingleOwnerOAuthProvider:
@@ -164,6 +208,7 @@ class SingleOwnerOAuthProvider:
             )
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        self.store.cleanup()
         with self.store._connect() as conn:
             row = conn.execute(
                 "select client_json from oauth_clients where client_id = ?",
@@ -187,19 +232,35 @@ class SingleOwnerOAuthProvider:
             )
         for redirect_uri in client_info.redirect_uris or []:
             self._validate_redirect_uri(str(redirect_uri))
+        self.store.cleanup()
+        now = int(time.time())
         with self.store._connect() as conn:
-            count = conn.execute("select count(*) from oauth_clients").fetchone()[0]
-            if count >= MAX_REGISTERED_CLIENTS:
-                raise RegistrationError(
-                    "invalid_client_metadata",
-                    "This deployment has reached its client limit.",
+            conn.execute("begin immediate")
+            count = conn.execute(
+                "select count(*) from oauth_clients where approved = 0"
+            ).fetchone()[0]
+            if count >= MAX_PENDING_CLIENTS:
+                conn.execute(
+                    """
+                    delete from oauth_clients where client_id in (
+                        select client_id from oauth_clients
+                        where approved = 0 order by created_at asc, rowid asc
+                        limit ?
+                    )
+                    """,
+                    (count - MAX_PENDING_CLIENTS + 1,),
                 )
             conn.execute(
-                "insert into oauth_clients(client_id, client_json, created_at) values (?, ?, ?)",
+                """
+                insert into oauth_clients(
+                    client_id, client_json, created_at, approved, expires_at
+                ) values (?, ?, ?, 0, ?)
+                """,
                 (
                     client_info.client_id,
                     client_info.model_dump_json(),
-                    int(time.time()),
+                    now,
+                    now + PENDING_CLIENT_TTL_SECONDS,
                 ),
             )
         self.store.event("client_registered", "success", client_info.client_id)
@@ -219,9 +280,33 @@ class SingleOwnerOAuthProvider:
         }
         expires_at = int(time.time()) + AUTHORIZATION_TTL_SECONDS
         with self.store._connect() as conn:
+            conn.execute("begin immediate")
             conn.execute(
-                "insert into oauth_pending(request_hash, request_json, expires_at) values (?, ?, ?)",
-                (_token_hash(request_id), json.dumps(payload), expires_at),
+                "delete from oauth_pending where client_id = ?", (client.client_id,)
+            )
+            count = conn.execute("select count(*) from oauth_pending").fetchone()[0]
+            if count >= MAX_PENDING_AUTHORIZATIONS:
+                conn.execute(
+                    """
+                    delete from oauth_pending where request_hash in (
+                        select request_hash from oauth_pending
+                        order by expires_at asc, rowid asc limit ?
+                    )
+                    """,
+                    (count - MAX_PENDING_AUTHORIZATIONS + 1,),
+                )
+            conn.execute(
+                """
+                insert into oauth_pending(
+                    request_hash, client_id, request_json, expires_at
+                ) values (?, ?, ?, ?)
+                """,
+                (
+                    _token_hash(request_id),
+                    client.client_id,
+                    json.dumps(payload),
+                    expires_at,
+                ),
             )
         return f"{self.issuer_url}/oauth/authorize?request={request_id}"
 
@@ -259,6 +344,16 @@ class SingleOwnerOAuthProvider:
                 )
             else:
                 payload = json.loads(row["request_json"])
+                client_row = conn.execute(
+                    "select client_id from oauth_clients where client_id = ?",
+                    (payload["client_id"],),
+                ).fetchone()
+                if client_row is None:
+                    conn.execute(
+                        "delete from oauth_pending where request_hash = ?",
+                        (request_hash,),
+                    )
+                    return None
                 params = AuthorizationParams.model_validate(payload["params"])
                 code_value = secrets.token_urlsafe(32)
                 code = AuthorizationCode(
@@ -282,6 +377,10 @@ class SingleOwnerOAuthProvider:
                 )
                 conn.execute(
                     "delete from oauth_pending where request_hash = ?", (request_hash,)
+                )
+                conn.execute(
+                    "update oauth_clients set approved = 1, expires_at = null where client_id = ?",
+                    (payload["client_id"],),
                 )
         if denied_client_id:
             self.store.event("authorization", "denied", denied_client_id)

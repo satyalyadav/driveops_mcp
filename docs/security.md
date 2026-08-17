@@ -7,14 +7,28 @@ DriveOps MCP is built around safe writes:
 - all Drive mutations, including file and permission actions, require a stored `plan_id`;
 - applying a plan requires the exact confirmation string from `driveops.preview_plan`;
 - undo requires the exact undo confirmation string;
-- every create, upload, rename, copy, move, trash/delete, permission, and undo event is written to SQLite;
-- permanent-delete plans are labeled irreversible and cannot be undone;
-- partially applied plans remain undoable when a later batch action fails;
+- successful mutation and undo steps are checkpointed in SQLite before their audit event is appended;
+- permanent deletes are labeled irreversible, cannot be undone, and must use a separate plan;
+- partially applied plans remain undoable unless a target changed afterward;
 - plan application and undo are atomically claimed so concurrent requests cannot execute the same plan twice;
-- partial undo progress is stored step-by-step and safely skipped when an undo is retried;
+- apply follows the previewed step order and refuses stale file or permission snapshots;
+- undo progress is stored step-by-step, retries skip completed steps, and stale targets are left untouched;
 - ZIP extraction blocks path traversal, symlinks, oversized expansion, and silent overwrite;
 - downloads refuse to overwrite local files unless explicitly requested.
-- OAuth tokens and the local audit database use owner-only permissions on POSIX systems.
+- OAuth tokens, databases, and the plan-encryption key use owner-only permissions on POSIX systems.
+
+Plan payloads are encrypted with Fernet because they can contain inline upload
+content and local paths. Local installs create `driveops.key` beside the audit
+database. Hosted installs should set `DRIVEOPS_PLAN_ENCRYPTION_KEY` from a secret
+manager and back up that key separately. Losing or rotating it without migration
+makes existing plans unreadable. Audit-event metadata and OAuth client metadata
+are not application-level encrypted, so the state volume and backups must still
+be encrypted by the host.
+
+The checkpoint removes most ambiguity after ordinary failures, but Google Drive
+and SQLite do not share a transaction. A process crash in the small interval
+between a Google API success and the local checkpoint can still require manual
+inspection before retrying.
 
 ## Secrets
 

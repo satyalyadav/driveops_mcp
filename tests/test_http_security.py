@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -11,9 +12,13 @@ from mcp.server.auth.provider import AuthorizationParams, RegistrationError
 from mcp.shared.auth import OAuthClientInformationFull
 from starlette.testclient import TestClient
 
-from driveops_mcp.oauth import OAuthStore, SingleOwnerOAuthProvider
-from driveops_mcp.server import build_server, create_http_app
 from driveops_mcp.auth import READONLY_SCOPES
+from driveops_mcp.oauth import (
+    MAX_PENDING_CLIENTS,
+    OAuthStore,
+    SingleOwnerOAuthProvider,
+)
+from driveops_mcp.server import build_server, create_http_app
 
 
 def _configured_google_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -284,6 +289,127 @@ async def test_oauth_redirect_allowlist_is_exact(tmp_path: Path) -> None:
     )
     with pytest.raises(RegistrationError, match="not allowlisted"):
         await provider.register_client(client)
+
+
+@pytest.mark.asyncio
+async def test_oauth_registration_evicts_only_unapproved_clients(
+    tmp_path: Path,
+) -> None:
+    callback = "https://client.example/callback"
+    store = OAuthStore(tmp_path / "oauth.db")
+    provider = SingleOwnerOAuthProvider(
+        issuer_url="https://mcp.example.com",
+        access_key="owner-access-key-with-at-least-32-bytes",
+        allowed_redirect_uris={callback},
+        store=store,
+    )
+
+    def client_info(client_id: str) -> OAuthClientInformationFull:
+        return OAuthClientInformationFull(
+            client_id=client_id,
+            redirect_uris=[callback],
+            token_endpoint_auth_method="none",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            scope="driveops",
+        )
+
+    approved = client_info("approved-client")
+    await provider.register_client(approved)
+    authorize_url = await provider.authorize(
+        approved,
+        AuthorizationParams(
+            state="state",
+            scopes=["driveops"],
+            code_challenge="challenge",
+            redirect_uri=callback,
+            redirect_uri_provided_explicitly=True,
+            resource="https://mcp.example.com/mcp",
+        ),
+    )
+    request_id = parse_qs(urlsplit(authorize_url).query)["request"][0]
+    assert provider.approve(request_id, "owner-access-key-with-at-least-32-bytes")
+
+    for index in range(MAX_PENDING_CLIENTS + 5):
+        await provider.register_client(client_info(f"pending-{index}"))
+
+    assert await provider.get_client("approved-client") is not None
+    assert await provider.get_client("pending-0") is None
+    assert await provider.get_client(f"pending-{MAX_PENDING_CLIENTS + 4}") is not None
+    with store._connect() as conn:
+        pending_count = conn.execute(
+            "select count(*) from oauth_clients where approved = 0"
+        ).fetchone()[0]
+    assert pending_count == MAX_PENDING_CLIENTS
+
+
+@pytest.mark.asyncio
+async def test_oauth_keeps_only_latest_authorization_per_client(
+    tmp_path: Path,
+) -> None:
+    callback = "https://client.example/callback"
+    store = OAuthStore(tmp_path / "oauth.db")
+    provider = SingleOwnerOAuthProvider(
+        issuer_url="https://mcp.example.com",
+        access_key="owner-access-key-with-at-least-32-bytes",
+        allowed_redirect_uris={callback},
+        store=store,
+    )
+    client = OAuthClientInformationFull(
+        client_id="client-1",
+        redirect_uris=[callback],
+        token_endpoint_auth_method="none",
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        scope="driveops",
+    )
+    await provider.register_client(client)
+    params = AuthorizationParams(
+        state="state",
+        scopes=["driveops"],
+        code_challenge="challenge",
+        redirect_uri=callback,
+        redirect_uri_provided_explicitly=True,
+        resource="https://mcp.example.com/mcp",
+    )
+
+    first_url = await provider.authorize(client, params)
+    second_url = await provider.authorize(client, params)
+    first_id = parse_qs(urlsplit(first_url).query)["request"][0]
+    second_id = parse_qs(urlsplit(second_url).query)["request"][0]
+
+    assert provider.pending_request(first_id) is None
+    assert provider.pending_request(second_id) is not None
+    with store._connect() as conn:
+        assert conn.execute("select count(*) from oauth_pending").fetchone()[0] == 1
+
+
+def test_oauth_store_migrates_existing_clients_as_approved(tmp_path: Path) -> None:
+    db_path = tmp_path / "oauth.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table oauth_clients (
+                client_id text primary key,
+                client_json text not null,
+                created_at integer not null
+            )
+            """
+        )
+        conn.execute(
+            "insert into oauth_clients values (?, ?, ?)",
+            ("legacy-client", "{}", 1),
+        )
+
+    store = OAuthStore(db_path)
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "select approved, expires_at from oauth_clients where client_id = ?",
+            ("legacy-client",),
+        ).fetchone()
+    assert row["approved"] == 1
+    assert row["expires_at"] is None
 
 
 @pytest.mark.asyncio

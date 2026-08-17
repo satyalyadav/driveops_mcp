@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 import stat
 
 from mcp.server.auth.middleware.auth_context import auth_context_var
@@ -35,6 +37,64 @@ def test_audit_store_round_trips_plan_and_events(tmp_path):
     assert events[0]["action"] == "plan_created"
     if os.name != "nt":
         assert stat.S_IMODE(store.db_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(store.key_path.stat().st_mode) == 0o600
+
+    with sqlite3.connect(store.db_path) as conn:
+        stored = conn.execute("select plan_json from plans where id = 'p1'").fetchone()[
+            0
+        ]
+    assert stored.startswith("fernet:")
+    assert '"plan_id": "p1"' not in stored
+
+
+def test_audit_store_migrates_plaintext_plans(tmp_path):
+    db_path = tmp_path / "driveops.db"
+    plan = {
+        "plan_id": "legacy",
+        "status": "planned",
+        "confirmation": "APPLY-legacy",
+        "undo_confirmation": "UNDO-legacy",
+        "strategy": "file_actions",
+        "folder": {"id": "root"},
+        "steps": [],
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table plans (
+                id text primary key, status text not null, created_at text not null,
+                updated_at text not null, confirmation text not null,
+                undo_confirmation text not null, strategy text not null,
+                folder_id text not null, dry_run integer not null,
+                plan_json text not null, error text
+            )
+            """
+        )
+        conn.execute(
+            "insert into plans values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy",
+                "planned",
+                "now",
+                "now",
+                "APPLY-legacy",
+                "UNDO-legacy",
+                "file_actions",
+                "root",
+                1,
+                json.dumps(plan),
+                None,
+            ),
+        )
+
+    store = AuditStore(db_path)
+
+    assert store.get_plan("legacy")["plan_id"] == "legacy"
+    with sqlite3.connect(db_path) as conn:
+        stored = conn.execute(
+            "select plan_json from plans where id = 'legacy'"
+        ).fetchone()[0]
+    assert stored.startswith("fernet:")
 
 
 def test_audit_event_records_authenticated_client(tmp_path):

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -22,12 +22,10 @@ ScopeProfile = Literal["readonly", "write"]
 READONLY_SCOPES = [
     "https://www.googleapis.com/auth/drive.metadata.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 
 WRITE_SCOPES = [
     "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/spreadsheets",
 ]
 
 AUTH_REFRESH_ATTEMPTS = 3
@@ -113,7 +111,7 @@ def _credentials_from_json(content: str, scopes: list[str]) -> Credentials:
     try:
         info = json.loads(content)
         if not isinstance(info, dict):
-            raise ValueError
+            raise TypeError
         return Credentials.from_authorized_user_info(info, scopes)
     except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
         raise ValueError(
@@ -442,9 +440,7 @@ def get_credentials(
                 _write_private_text(token, creds.to_json())
             return creds
         except RefreshError as exc:
-            rejected = _refresh_rejected_error(
-                exc, profile or scope_profile()
-            )
+            rejected = _refresh_rejected_error(exc, profile or scope_profile())
             if injected_token:
                 raise AuthRefreshRejectedError(
                     f"{rejected} Replace DRIVEOPS_GOOGLE_TOKEN_JSON before "

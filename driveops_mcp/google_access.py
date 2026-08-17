@@ -60,6 +60,7 @@ class GoogleAccessMixin:
         domain: str | None = None,
         allow_file_discovery: bool | None = None,
         send_notification_email: bool = True,
+        expiration_time: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"type": permission_type, "role": role}
         if email_address:
@@ -68,6 +69,8 @@ class GoogleAccessMixin:
             body["domain"] = domain
         if allow_file_discovery is not None:
             body["allowFileDiscovery"] = allow_file_discovery
+        if expiration_time:
+            body["expirationTime"] = expiration_time
         return (
             self.drive.permissions()
             .create(

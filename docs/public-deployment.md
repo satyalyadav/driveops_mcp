@@ -16,8 +16,10 @@ requires one of these modes:
   an `Authorization` header.
 
 OAuth authorization codes, access tokens, and refresh tokens are stored only as
-SHA-256 hashes. Registered OAuth client metadata can include client secrets, so
-the persistent state volume must be private and encrypted at rest.
+SHA-256 hashes. Unapproved dynamic registrations expire after 15 minutes and are
+bounded to 50 entries; entering the owner key makes that client registration
+persistent. Registered client metadata can include client secrets, so the
+persistent state volume must be private and encrypted at rest.
 
 Remote mode also:
 
@@ -65,11 +67,14 @@ export DRIVEOPS_MCP_AUTH_MODE=oauth
 export DRIVEOPS_OAUTH_ACCESS_KEY=replace-with-a-random-32-byte-or-longer-secret
 export DRIVEOPS_OAUTH_ALLOWED_REDIRECT_URIS=https://client.example/oauth/callback
 export DRIVEOPS_STATE_DIR=/persistent/driveops
+export DRIVEOPS_PLAN_ENCRYPTION_KEY=replace-with-a-generated-fernet-key
 driveops-mcp http --host 0.0.0.0 --port 8787
 ```
 
 Generate the owner access key with a cryptographically secure secret generator,
-for example `openssl rand -base64 32`, and store it in the host's secret manager.
+for example `openssl rand -base64 32`. Generate the plan key with
+`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+Store both in the host's secret manager.
 When a client opens the DriveOps approval page, verify the displayed client and
 callback before entering the key.
 
@@ -107,8 +112,10 @@ reveals credential contents.
 
 ## Persistence and scaling
 
-`driveops.db` contains plans and audit events. `oauth.db` contains registered
-clients, hashed tokens, and OAuth security events. Both must survive restarts.
+`driveops.db` contains encrypted plans and unencrypted audit metadata. `oauth.db`
+contains registered clients, hashed tokens, and OAuth security events. Both must
+survive restarts. If a local `driveops.key` is used instead of the environment
+key, it must survive too; keep a separate secure key backup.
 
 The current persistence layer is SQLite. Run exactly one application instance on
 a durable local volume and include both databases in encrypted backups. Do not
