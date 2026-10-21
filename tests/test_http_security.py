@@ -460,9 +460,19 @@ async def test_remote_server_blocks_host_upload_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_expected_validation_errors_keep_their_message() -> None:
+async def test_expected_validation_errors_keep_their_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from mcp import Client
 
+    from driveops_mcp import server as server_module
+    from driveops_mcp.errors import DriveOpsValidationError
+
+    class StubPlanner:
+        def plan_file_actions(self, **_: object) -> None:
+            raise DriveOpsValidationError("At least one action is required.")
+
+    monkeypatch.setattr(server_module, "_planner", lambda: StubPlanner())
     async with Client(build_server(allow_local_file_access=False)) as client:
         result = await client.call_tool("driveops.plan_file_actions", {"actions": []})
     assert result.is_error
