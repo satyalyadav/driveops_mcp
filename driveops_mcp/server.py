@@ -18,6 +18,7 @@ from mcp.server.auth.settings import (
     ClientRegistrationOptions,
     RevocationOptions,
 )
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
@@ -218,7 +219,7 @@ def build_server(
         overwrite: bool = False,
     ) -> dict[str, Any]:
         if output_path and not allow_local_file_access:
-            raise PermissionError(
+            raise ToolError(
                 "Writing downloads to the MCP server filesystem is disabled for remote HTTP."
             )
         return _drive().download_file(
@@ -242,7 +243,7 @@ def build_server(
         overwrite: bool = False,
     ) -> dict[str, Any]:
         if output_dir and not allow_local_file_access:
-            raise PermissionError(
+            raise ToolError(
                 "Extracting files on the MCP server filesystem is disabled for remote HTTP."
             )
         return _drive().extract_file(
@@ -316,7 +317,7 @@ def build_server(
         actions: list[DriveFileAction], dry_run: bool = True
     ) -> dict[str, Any]:
         if not allow_local_file_access and any(action.local_path for action in actions):
-            raise PermissionError(
+            raise ToolError(
                 "Reading upload content from the MCP server filesystem is disabled for remote HTTP. "
                 "Use create_file with text or content_base64 instead."
             )

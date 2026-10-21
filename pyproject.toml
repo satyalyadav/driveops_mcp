@@ -13,7 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp[cli]==2.0.0",
+    "mcp[cli]==2.2.0",
     "cryptography>=50.0.0",
     "google-auth>=2.29.0",
     "google-auth-oauthlib>=1.2.0",
