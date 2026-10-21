@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from mcp.server.auth.middleware.auth_context import get_access_token
 
 from .auth import state_dir
+from .errors import DriveOpsValidationError
 from .schemas import now_iso
 
 ENCRYPTED_PLAN_PREFIX = "fernet:"
@@ -179,7 +180,7 @@ class AuditStore:
         self, *, status: str | None = None, statuses: set[str] | None = None
     ) -> dict[str, Any]:
         if status and statuses:
-            raise ValueError("Provide status or statuses, not both.")
+            raise DriveOpsValidationError("Provide status or statuses, not both.")
         sql = "select * from plans"
         params: list[Any] = []
         if status:
@@ -236,7 +237,7 @@ class AuditStore:
         """Atomically claim a plan before executing external side effects."""
 
         if not expected_statuses:
-            raise ValueError("expected_statuses must not be empty.")
+            raise DriveOpsValidationError("expected_statuses must not be empty.")
         with self._connect() as conn:
             conn.execute("begin immediate")
             row = conn.execute(
@@ -246,7 +247,7 @@ class AuditStore:
                 raise KeyError(f"Plan {plan_id} not found.")
             if row["status"] not in expected_statuses:
                 expected = ", ".join(sorted(expected_statuses))
-                raise ValueError(
+                raise DriveOpsValidationError(
                     f"Plan {plan_id} is {row['status']}; expected one of: {expected}."
                 )
             plan = self._decode_plan(row["plan_json"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,9 +92,9 @@ class DriveFileAction(BaseModel):
 
 
 def now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def confirmation_for(plan_id: str) -> str:

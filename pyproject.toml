@@ -3,12 +3,11 @@ name = "driveops-mcp"
 version = "0.3.2"
 description = "Open-source MCP-native Google Drive operations layer with plans, approvals, undo, and audit logs."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 classifiers = [
     "Development Status :: 7 - Inactive",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]

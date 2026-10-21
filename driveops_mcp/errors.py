@@ -9,6 +9,10 @@ class DriveOpsError(RuntimeError):
     pass
 
 
+class DriveOpsValidationError(DriveOpsError, ValueError):
+    """A request validation failure that is safe to show to the MCP client."""
+
+
 class AmbiguousFileError(DriveOpsError):
     def __init__(
         self, file_name: str, matches: list[dict[str, Any]], has_more: bool = False
