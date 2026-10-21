@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from .audit import AuditStore
 from .auth import require_write_profile
 from .backend import DriveBackend
+from .errors import DriveOpsValidationError
 from .schemas import (
     GOOGLE_FOLDER_MIME,
     OrganizationStrategy,
@@ -72,7 +73,7 @@ def target_folder_name(file: dict[str, Any], strategy: OrganizationStrategy) -> 
         name = file.get("name") or "untitled"
         prefix = re.split(r"[-_ .]", name, maxsplit=1)[0].strip().lower()
         return prefix[:40] or "untitled"
-    raise ValueError(f"Unsupported organization strategy: {strategy}")
+    raise DriveOpsValidationError(f"Unsupported organization strategy: {strategy}")
 
 
 def _safe_int(value: Any) -> int | None:
@@ -88,7 +89,7 @@ def _parse_drive_time(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
@@ -174,9 +175,9 @@ class DriveOpsPlanner:
         """Resolve and store a safe, auditable batch of ordinary Drive actions."""
 
         if not actions:
-            raise ValueError("At least one action is required.")
+            raise DriveOpsValidationError("At least one action is required.")
         if len(actions) > 100:
-            raise ValueError("A file action plan is limited to 100 actions.")
+            raise DriveOpsValidationError("A file action plan is limited to 100 actions.")
         drive = self._drive()
         steps: list[dict[str, Any]] = []
         irreversible = 0
@@ -184,7 +185,7 @@ class DriveOpsPlanner:
         for index, action in enumerate(actions):
             kind = str(action.get("type") or "").strip()
             if not kind:
-                raise ValueError(f"Action {index + 1} is missing type.")
+                raise DriveOpsValidationError(f"Action {index + 1} is missing type.")
             step: dict[str, Any] = {
                 "type": kind,
                 "status": "pending",
@@ -213,17 +214,17 @@ class DriveOpsPlanner:
                     )
                 )
                 if content_sources > 1:
-                    raise ValueError(
+                    raise DriveOpsValidationError(
                         f"Action {index + 1} must provide only one of text, content_base64, or local_path."
                     )
                 if kind == "upload_file" and not local_path:
-                    raise ValueError(
+                    raise DriveOpsValidationError(
                         f"Action {index + 1} upload_file requires local_path."
                     )
                 if local_path:
                     source = Path(str(local_path)).expanduser()
                     if not source.is_file():
-                        raise ValueError(
+                        raise DriveOpsValidationError(
                             f"Action {index + 1} upload source is not a file: {source}"
                         )
                     name = name or source.name
@@ -232,10 +233,10 @@ class DriveOpsPlanner:
                         "modified_ns": source.stat().st_mtime_ns,
                     }
                 if not name:
-                    raise ValueError(f"Action {index + 1} requires name.")
+                    raise DriveOpsValidationError(f"Action {index + 1} requires name.")
                 content_base64 = action.get("content_base64")
                 if content_base64 is not None and len(str(content_base64)) > 7_000_000:
-                    raise ValueError(
+                    raise DriveOpsValidationError(
                         "Inline base64 uploads are limited to about 5 MB; use local_path for larger files."
                     )
                 parent = drive.resolve_folder_exact(
@@ -289,12 +290,12 @@ class DriveOpsPlanner:
                     )
                     parents = current.get("parents", [])
                     if not parents:
-                        raise ValueError(
+                        raise DriveOpsValidationError(
                             f"Action {index + 1}: file has no movable parent."
                         )
                     source_parent = str(action.get("source_parent_id") or parents[0])
                     if source_parent not in parents:
-                        raise ValueError(
+                        raise DriveOpsValidationError(
                             f"Action {index + 1}: source_parent_id is not a current parent."
                         )
                     step.update(
@@ -307,21 +308,21 @@ class DriveOpsPlanner:
                     permission_type = str(action.get("permission_type") or "user")
                     role = str(action.get("role") or "reader")
                     if permission_type not in {"user", "group", "domain", "anyone"}:
-                        raise ValueError(
+                        raise DriveOpsValidationError(
                             f"Action {index + 1}: unsupported permission_type."
                         )
                     if role not in SUPPORTED_PERMISSION_ROLES:
-                        raise ValueError(
+                        raise DriveOpsValidationError(
                             f"Action {index + 1}: unsupported permission role."
                         )
                     if permission_type in {"user", "group"} and not action.get(
                         "email_address"
                     ):
-                        raise ValueError(
+                        raise DriveOpsValidationError(
                             f"Action {index + 1}: email_address is required."
                         )
                     if permission_type == "domain" and not action.get("domain"):
-                        raise ValueError(f"Action {index + 1}: domain is required.")
+                        raise DriveOpsValidationError(f"Action {index + 1}: domain is required.")
                     step.update(
                         permission_type=permission_type,
                         role=role,
@@ -341,18 +342,18 @@ class DriveOpsPlanner:
                     if kind == "update_permission":
                         step["role"] = self._required(action, "role", index)
                         if step["role"] not in SUPPORTED_PERMISSION_ROLES:
-                            raise ValueError(
+                            raise DriveOpsValidationError(
                                 f"Action {index + 1}: unsupported permission role."
                             )
                 elif kind == "delete_file":
                     step["irreversible"] = True
                     irreversible += 1
             else:
-                raise ValueError(f"Action {index + 1} has unsupported type '{kind}'.")
+                raise DriveOpsValidationError(f"Action {index + 1} has unsupported type '{kind}'.")
             steps.append(step)
 
         if irreversible and irreversible != len(steps):
-            raise ValueError(
+            raise DriveOpsValidationError(
                 "Permanent deletes must be placed in their own plan so reversible "
                 "actions can always be undone independently."
             )
@@ -393,7 +394,7 @@ class DriveOpsPlanner:
     def _required(action: dict[str, Any], key: str, index: int) -> str:
         value = str(action.get(key) or "").strip()
         if not value:
-            raise ValueError(f"Action {index + 1} requires {key}.")
+            raise DriveOpsValidationError(f"Action {index + 1} requires {key}.")
         return value
 
     def plan_organize_folder(
@@ -406,7 +407,7 @@ class DriveOpsPlanner:
         drive = self._drive()
         listing = drive.list_folder(folder_id_or_name, page_size=MAX_PLAN_ITEMS)
         if listing.get("has_more"):
-            raise ValueError(
+            raise DriveOpsValidationError(
                 f"Folder has more than {MAX_PLAN_ITEMS} items. "
                 "Refine the request or organize a smaller folder to avoid an incomplete plan."
             )
@@ -506,7 +507,7 @@ class DriveOpsPlanner:
 
         duplicate_groups = self._duplicate_groups(non_folders)
         version_groups = self._version_groups(non_folders)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(stale_days)))
+        cutoff = datetime.now(UTC) - timedelta(days=max(1, int(stale_days)))
         stale_folders = [
             _compact_file(item)
             for item in folders
@@ -595,7 +596,7 @@ class DriveOpsPlanner:
         drive = self._drive()
         listing = drive.list_folder(folder_id_or_name, page_size=MAX_PLAN_ITEMS)
         if listing.get("has_more"):
-            raise ValueError(
+            raise DriveOpsValidationError(
                 f"Folder has more than {MAX_PLAN_ITEMS} items. "
                 "Refine the request or clean up a smaller folder to avoid an incomplete plan."
             )
@@ -858,13 +859,13 @@ class DriveOpsPlanner:
         )
         plan_id = preview["plan_id"]
         if preview["status"] != "planned":
-            raise ValueError(
+            raise DriveOpsValidationError(
                 f"Plan {plan_id} is {preview['status']}; only planned plans can be applied."
             )
         if confirmation != preview["confirmation"]:
-            raise ValueError("Confirmation string does not match plan preview.")
+            raise DriveOpsValidationError("Confirmation string does not match plan preview.")
         if not preview["steps"]:
-            raise ValueError("Refusing to apply an empty plan.")
+            raise DriveOpsValidationError("Refusing to apply an empty plan.")
         plan = self.audit.claim_plan(
             plan_id, expected_statuses={"planned"}, claimed_status="applying"
         )
@@ -1120,16 +1121,16 @@ class DriveOpsPlanner:
         )
         plan_id = preview["plan_id"]
         if preview["status"] not in undoable_statuses:
-            raise ValueError(
+            raise DriveOpsValidationError(
                 f"Plan {plan_id} is {preview['status']}; only applied, partially applied, or partially undone plans can be undone."
             )
         if confirmation != preview["undo_confirmation"]:
-            raise ValueError("Undo confirmation string does not match plan preview.")
+            raise DriveOpsValidationError("Undo confirmation string does not match plan preview.")
         if any(
             step.get("type") == "delete_file" and step.get("status") == "applied"
             for step in preview["steps"]
         ):
-            raise ValueError(
+            raise DriveOpsValidationError(
                 "This plan contains a permanent delete and cannot be undone."
             )
         plan = self.audit.claim_plan(

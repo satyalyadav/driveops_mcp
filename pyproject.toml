@@ -3,17 +3,16 @@ name = "driveops-mcp"
 version = "0.3.2"
 description = "Open-source MCP-native Google Drive operations layer with plans, approvals, undo, and audit logs."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 classifiers = [
     "Development Status :: 7 - Inactive",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp[cli]==2.0.0",
+    "mcp[cli]==2.2.0",
     "cryptography>=50.0.0",
     "google-auth>=2.29.0",
     "google-auth-oauthlib>=1.2.0",

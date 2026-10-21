@@ -8,6 +8,7 @@ import json
 import os
 import threading
 from collections.abc import Callable
+from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -18,6 +19,7 @@ from mcp.server.auth.settings import (
     ClientRegistrationOptions,
     RevocationOptions,
 )
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
@@ -35,6 +37,7 @@ from .auth import (
     scope_profile,
 )
 from .backend import DriveBackend
+from .errors import DriveOpsError
 from .google_drive import GoogleDriveClient
 from .http_security import (
     StaticTokenVerifier,
@@ -54,6 +57,19 @@ INSTRUCTIONS = """DriveOps MCP is a safe, general Google Drive operations layer.
 _drive_factory: Callable[[], DriveBackend] = GoogleDriveClient
 _store_factory: Callable[[], AuditStore] = AuditStore
 _drive_factory_generation = 0
+
+
+def _tool_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Surface expected domain and validation failures as MCP tool errors."""
+
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except DriveOpsError as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper
 
 
 class _DriveThreadState(threading.local):
@@ -153,6 +169,7 @@ def build_server(
         description="Search Google Drive files. This is read-only and returns metadata plus Drive links.",
         structured_output=True,
     )
+    @_tool_errors
     def search_files(
         query: str,
         folder_id: str | None = None,
@@ -173,6 +190,7 @@ def build_server(
         description="Read a Google Drive file by ID, exact filename, or search text. Text is returned when safe; binary files return metadata and download hints.",
         structured_output=True,
     )
+    @_tool_errors
     def read_file(
         file_id_or_name: str, export_format: str | None = None
     ) -> dict[str, Any]:
@@ -183,6 +201,7 @@ def build_server(
         description="Resolve a folder ID or name and list its immediate children.",
         structured_output=True,
     )
+    @_tool_errors
     def list_folder(
         folder_id_or_name: str, page_size: int = 100, page_token: str | None = None
     ) -> dict[str, Any]:
@@ -195,6 +214,7 @@ def build_server(
         description="List files in a folder modified since an ISO date such as 2026-06-29.",
         structured_output=True,
     )
+    @_tool_errors
     def get_changes(
         folder_id_or_name: str,
         since: str,
@@ -210,6 +230,7 @@ def build_server(
         description="Download a blob file or export a Google Workspace file. Returns base64 bytes unless output_path is provided, in which case it saves on the MCP server host.",
         structured_output=True,
     )
+    @_tool_errors
     def download_file(
         file_id_or_name: str,
         export_format: str | None = None,
@@ -218,7 +239,7 @@ def build_server(
         overwrite: bool = False,
     ) -> dict[str, Any]:
         if output_path and not allow_local_file_access:
-            raise PermissionError(
+            raise ToolError(
                 "Writing downloads to the MCP server filesystem is disabled for remote HTTP."
             )
         return _drive().download_file(
@@ -234,6 +255,7 @@ def build_server(
         description="Extract text from Google Docs/Sheets/Slides, text, PDF, DOCX, PPTX, or XLSX files. ZIP files return a manifest or unpack safely when output_dir is provided.",
         structured_output=True,
     )
+    @_tool_errors
     def extract_file(
         file_id_or_name: str,
         output_dir: str | None = None,
@@ -242,7 +264,7 @@ def build_server(
         overwrite: bool = False,
     ) -> dict[str, Any]:
         if output_dir and not allow_local_file_access:
-            raise PermissionError(
+            raise ToolError(
                 "Extracting files on the MCP server filesystem is disabled for remote HTTP."
             )
         return _drive().extract_file(
@@ -258,6 +280,7 @@ def build_server(
         description="List the users, groups, domains, and public links that can access a file or folder.",
         structured_output=True,
     )
+    @_tool_errors
     def list_permissions(
         file_id_or_name: str, page_size: int = 100, page_token: str | None = None
     ) -> dict[str, Any]:
@@ -270,6 +293,7 @@ def build_server(
         description="List shared drives available to the authenticated account.",
         structured_output=True,
     )
+    @_tool_errors
     def list_shared_drives(
         page_size: int = 100, page_token: str | None = None
     ) -> dict[str, Any]:
@@ -280,6 +304,7 @@ def build_server(
         description="Get a durable starting token for the real Google Drive Changes feed, optionally for one shared drive.",
         structured_output=True,
     )
+    @_tool_errors
     def get_change_token(drive_id: str | None = None) -> dict[str, Any]:
         return _drive().get_start_page_token(drive_id=drive_id)
 
@@ -288,6 +313,7 @@ def build_server(
         description="Read the real Google Drive Changes feed, including removed or moved items. Begin with drive.get_change_token and persist the returned continuation token.",
         structured_output=True,
     )
+    @_tool_errors
     def list_changes(
         page_token: str,
         drive_id: str | None = None,
@@ -312,11 +338,12 @@ def build_server(
         ),
         structured_output=True,
     )
+    @_tool_errors
     def plan_file_actions(
         actions: list[DriveFileAction], dry_run: bool = True
     ) -> dict[str, Any]:
         if not allow_local_file_access and any(action.local_path for action in actions):
-            raise PermissionError(
+            raise ToolError(
                 "Reading upload content from the MCP server filesystem is disabled for remote HTTP. "
                 "Use create_file with text or content_base64 instead."
             )
@@ -328,6 +355,7 @@ def build_server(
         description="Create a stored safe organization plan for a folder. This never mutates Drive.",
         structured_output=True,
     )
+    @_tool_errors
     def plan_organize_folder(
         folder_id_or_name: str,
         strategy: OrganizationStrategy,
@@ -344,6 +372,7 @@ def build_server(
         description="Summarize Drive clutter in a folder: loose root files, duplicate names, version-like files, stale folders, large binaries, sensitive-looking docs, and unmanaged media. This never mutates Drive.",
         structured_output=True,
     )
+    @_tool_errors
     def hygiene_report(
         folder_id_or_name: str = "My Drive",
         page_size: int = 1000,
@@ -362,6 +391,7 @@ def build_server(
         description="Create a safe plan that archives older duplicate-name and version-like files into a review folder. It never deletes files and never mutates Drive until apply_plan is approved.",
         structured_output=True,
     )
+    @_tool_errors
     def plan_duplicate_cleanup(
         folder_id_or_name: str,
         archive_folder_name: str = "DriveOps Review - Duplicates",
@@ -378,6 +408,7 @@ def build_server(
         description="Preview a stored DriveOps plan and retrieve confirmation strings. Omit plan_id to preview the latest plan. Use detail='full' only when every step is needed.",
         structured_output=True,
     )
+    @_tool_errors
     def preview_plan(
         plan_id: str | None = None,
         detail: str = "summary",
@@ -392,6 +423,7 @@ def build_server(
         description="Apply a stored DriveOps plan. Omit plan_id to apply the latest planned plan. Requires write profile and exact confirmation.",
         structured_output=True,
     )
+    @_tool_errors
     def apply_plan(confirmation: str, plan_id: str | None = None) -> dict[str, Any]:
         require_write_profile()
         return _planner().apply_plan(plan_id=plan_id, confirmation=confirmation)
@@ -401,6 +433,7 @@ def build_server(
         description="Undo reversible actions from an applied DriveOps plan. Omit plan_id to undo the latest applied plan. Requires write profile and exact undo confirmation; interrupted undos can be retried safely.",
         structured_output=True,
     )
+    @_tool_errors
     def undo_plan(confirmation: str, plan_id: str | None = None) -> dict[str, Any]:
         require_write_profile()
         return _planner().undo_plan(plan_id=plan_id, confirmation=confirmation)
@@ -410,6 +443,7 @@ def build_server(
         description="List DriveOps audit events, optionally scoped to a plan.",
         structured_output=True,
     )
+    @_tool_errors
     def list_audit_events(
         limit: int = 50, plan_id: str | None = None
     ) -> dict[str, Any]:
@@ -421,6 +455,7 @@ def build_server(
         description="Compatibility alias for drive.search_files.",
         structured_output=True,
     )
+    @_tool_errors
     def gdrive_search(
         query: str = "*",
         folderId: str | None = None,
@@ -433,6 +468,7 @@ def build_server(
         description="Compatibility alias for drive.read_file.",
         structured_output=True,
     )
+    @_tool_errors
     def gdrive_read_file(fileId: str) -> dict[str, Any]:
         return read_file(file_id_or_name=fileId)
 

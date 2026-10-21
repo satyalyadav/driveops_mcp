@@ -423,3 +423,57 @@ async def test_remote_server_blocks_host_filesystem_paths() -> None:
         )
     assert result.is_error
     assert "server filesystem is disabled" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_remote_server_blocks_host_file_extraction() -> None:
+    from mcp import Client
+
+    async with Client(build_server(allow_local_file_access=False)) as client:
+        result = await client.call_tool(
+            "drive.extract_file",
+            {"file_id_or_name": "file-id", "output_dir": "/tmp/private"},
+        )
+    assert result.is_error
+    assert "server filesystem is disabled" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_remote_server_blocks_host_upload_paths() -> None:
+    from mcp import Client
+
+    async with Client(build_server(allow_local_file_access=False)) as client:
+        result = await client.call_tool(
+            "driveops.plan_file_actions",
+            {
+                "actions": [
+                    {
+                        "type": "upload_file",
+                        "file_id_or_name": "file-id",
+                        "local_path": "/tmp/private",
+                    }
+                ]
+            },
+        )
+    assert result.is_error
+    assert "server filesystem is disabled" in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_expected_validation_errors_keep_their_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    from driveops_mcp import server as server_module
+    from driveops_mcp.errors import DriveOpsValidationError
+
+    class StubPlanner:
+        def plan_file_actions(self, **_: object) -> None:
+            raise DriveOpsValidationError("At least one action is required.")
+
+    monkeypatch.setattr(server_module, "_planner", lambda: StubPlanner())
+    async with Client(build_server(allow_local_file_access=False)) as client:
+        result = await client.call_tool("driveops.plan_file_actions", {"actions": []})
+    assert result.is_error
+    assert "At least one action is required." in result.content[0].text

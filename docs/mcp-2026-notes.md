@@ -1,6 +1,6 @@
 # MCP 2026 Notes
 
-DriveOps MCP targets MCP `2026-07-28` using the stable `mcp[cli]==2.0.0` SDK.
+DriveOps MCP targets MCP `2026-07-28` using the stable `mcp[cli]==2.2.0` SDK.
 
 Design choices:
 
